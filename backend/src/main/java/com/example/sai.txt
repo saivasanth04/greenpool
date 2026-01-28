@@ -1,0 +1,3293 @@
+MY PROJECT JAVA FILES
+==================================================
+
+==================== CONFIG ====================
+
+----- FILE: config\CustomUserDetailsService.java -----
+
+// File: C:\Projects\EchoU\backend\src\main\java\com\example\config\CustomUserDetailsService.java
+
+package com.example.config;
+
+import com.example.entity.User;
+import com.example.entity.Parent; // CHANGE: Added import
+import com.example.repository.UserRepository;
+import com.example.repository.ParentRepository; // CHANGE: Added import
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.core.userdetails.UsernameNotFoundException;
+import org.springframework.stereotype.Service;
+
+@Service
+public class CustomUserDetailsService implements UserDetailsService {
+
+    @Autowired
+    private UserRepository userRepository;
+
+    @Autowired
+    private ParentRepository parentRepository; // CHANGE: Added
+
+    @Override
+    public UserDetails loadUserByUsername(String username) throws UsernameNotFoundException {
+        User user = userRepository.findByUsername(username);
+        if (user != null) {
+            return org.springframework.security.core.userdetails.User.withUsername(user.getUsername())
+                   .password(user.getPassword())
+                   .authorities("USER")
+                   .build();
+        }
+        // CHANGE: Check for parent if user not found
+        Parent parent = parentRepository.findByUsername(username);
+        if (parent != null) {
+            return org.springframework.security.core.userdetails.User.withUsername(parent.getUsername())
+                   .password(parent.getPassword())
+                   .authorities("PARENT")
+                   .build();
+        }
+        throw new UsernameNotFoundException("User not found: " + username);
+    }
+}
+
+--------------------------------------------------------------------------------
+
+----- FILE: config\JwtAuthenticationFilter.java -----
+
+package com.example.config;
+
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.Cookie;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.core.userdetails.UsernameNotFoundException;
+import org.springframework.security.web.authentication.WebAuthenticationDetailsSource;
+import org.springframework.web.filter.OncePerRequestFilter;
+
+import java.io.IOException;
+
+public class JwtAuthenticationFilter extends OncePerRequestFilter {
+
+    private final JwtTokenProvider tokenProvider;
+    private final UserDetailsService userDetailsService;
+
+    public JwtAuthenticationFilter(JwtTokenProvider tokenProvider, UserDetailsService userDetailsService) {
+        this.tokenProvider = tokenProvider;
+        this.userDetailsService = userDetailsService;
+    }
+
+    @Override
+    protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
+            throws ServletException, IOException {
+        String jwt = getJwtFromRequest(request);
+
+        if (jwt != null) {
+            try {
+                if (tokenProvider.validateToken(jwt)) {
+                    String username = tokenProvider.extractUsername(jwt);
+                    UserDetails userDetails = userDetailsService.loadUserByUsername(username);  // This may throw
+                    UsernamePasswordAuthenticationToken authentication = new UsernamePasswordAuthenticationToken(
+                            userDetails, null, userDetails.getAuthorities());
+                    authentication.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
+                    SecurityContextHolder.getContext().setAuthentication(authentication);
+                }
+            } catch (UsernameNotFoundException e) {
+                logger.warn("User not found for token username: {} - treating as unauthenticated");
+                // Continue without auth (will cause 401 later if endpoint requires it)
+            } catch (Exception e) {
+                logger.error("JWT processing failed: {}");
+                // Optional: response.sendError(HttpServletResponse.SC_UNAUTHORIZED, "Invalid token");
+                // But for now, just continue unauthenticated
+            }
+        }
+
+        filterChain.doFilter(request, response);
+    }
+  
+@Override
+protected boolean shouldNotFilter(HttpServletRequest request) throws ServletException {
+    String path = request.getRequestURI();
+    return path.startsWith("/api/auth/signup")
+        || path.startsWith("/api/auth/login");
+}
+
+
+    private String getJwtFromRequest(HttpServletRequest request) {
+        // Check for JWT in cookie
+        Cookie[] cookies = request.getCookies();
+        if (cookies != null) {
+            for (Cookie cookie : cookies) {
+                if ("jwt".equals(cookie.getName())) {
+                    return cookie.getValue();
+                }
+            }
+        }
+        // Fallback to Authorization header (optional, for flexibility)
+        String bearerToken = request.getHeader("Authorization");
+        if (bearerToken != null && bearerToken.startsWith("Bearer ")) {
+            return bearerToken.substring(7);
+        }
+        return null;
+    }
+}
+
+--------------------------------------------------------------------------------
+
+----- FILE: config\JwtTokenProvider.java -----
+
+// File: C:\Projects\EchoU\backend\src\main\java\com\example\config\JwtTokenProvider.java
+
+package com.example.config;
+
+import io.jsonwebtoken.*;
+import io.jsonwebtoken.io.Decoders;
+import io.jsonwebtoken.security.Keys;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.stereotype.Component;
+
+import javax.annotation.PostConstruct;
+import javax.crypto.SecretKey;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.function.Function;
+
+@Component
+public class JwtTokenProvider {
+
+    private static final Logger log = LoggerFactory.getLogger(JwtTokenProvider.class);
+
+    @Value("${jwt.secret}")
+    private String secretKey;
+
+    private SecretKey signingKey;
+
+    @PostConstruct
+    public void init() {
+        if (secretKey == null || secretKey.isBlank()) {
+            throw new IllegalStateException("JWT secret key is not configured");
+        }
+        byte[] keyBytes = Decoders.BASE64.decode(secretKey);
+        this.signingKey = Keys.hmacShaKeyFor(keyBytes);
+    }
+
+    // ---------------- TOKEN CREATION ----------------
+    public String generateToken(Map<String, Object> extraClaims, UserDetails userDetails) {
+        return Jwts.builder()
+                .claims(extraClaims)
+                .subject(userDetails.getUsername())
+                .issuedAt(new Date(System.currentTimeMillis()))
+                .expiration(new Date(System.currentTimeMillis() + 1000L * 60 * 60 * 10)) // 10h
+                .signWith(signingKey)
+                .compact();
+    }
+
+    public String generateToken(String username, int trustScore) {
+        Map<String, Object> claims = new HashMap<>();
+        claims.put("trustScore", trustScore);
+        // CHANGE: Add role claim (assume USER for now; adjust in service if parent)
+        claims.put("role", "USER");
+        return generateToken(claims,
+                org.springframework.security.core.userdetails.User.withUsername(username)
+                        .password("")
+                        .authorities("USER")
+                        .build());
+    }
+
+    public String generateToken(UserDetails userDetails) {
+        Map<String, Object> claims = new HashMap<>();
+        // CHANGE: Add role from authorities
+        String role = userDetails.getAuthorities().stream().findFirst().map(Object::toString).orElse("USER");
+        claims.put("role", role);
+        return generateToken(claims, userDetails);
+    }
+
+    // ---------------- TOKEN PARSING ----------------
+    private Claims extractAllClaims(String token) {
+        try {
+            return Jwts.parser()
+                    .verifyWith(signingKey)
+                    .build()
+                    .parseSignedClaims(token)
+                    .getPayload();
+        } catch (JwtException e) {
+            log.error("Failed to parse JWT: {}", e.getMessage());
+            throw new JwtException("Invalid JWT token", e);
+        }
+    }
+
+    public <T> T extractClaim(String token, Function<Claims, T> claimsResolver) {
+        final Claims claims = extractAllClaims(token);
+        return claimsResolver.apply(claims);
+    }
+
+    public String extractUsername(String token) {
+        return extractClaim(token, Claims::getSubject);
+    }
+
+    public Integer extractTrustScore(String token) {
+        return extractClaim(token, claims -> claims.get("trustScore", Integer.class));
+    }
+
+    private Date extractExpiration(String token) {
+        return extractClaim(token, Claims::getExpiration);
+    }
+
+    private boolean isTokenExpired(String token) {
+        Date exp = extractExpiration(token);
+        return exp != null && exp.before(new Date());
+    }
+
+    // ---------------- VALIDATION ----------------
+    public boolean isTokenValid(String token, UserDetails userDetails) {
+        try {
+            final String username = extractUsername(token);
+            return username != null && username.equals(userDetails.getUsername()) && !isTokenExpired(token);
+        } catch (ExpiredJwtException e) {
+            log.debug("Token expired: {}", token.substring(0, Math.min(20, token.length())));
+            return false;
+        } catch (JwtException e) {
+            log.warn("Invalid token: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    public boolean validateToken(String token) {
+        try {
+            Jwts.parser().verifyWith(signingKey).build().parseSignedClaims(token);
+            return true;
+        } catch (JwtException e) {
+            log.warn("JWT validation failed: {}", e.getMessage());
+            return false;
+        }
+    }
+}
+
+--------------------------------------------------------------------------------
+
+----- FILE: config\RedisConfig.java -----
+
+package com.example.config;
+
+import com.fasterxml.jackson.annotation.JsonTypeInfo;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.jsontype.impl.LaissezFaireSubTypeValidator;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.data.redis.connection.RedisStandaloneConfiguration;
+import org.springframework.data.redis.connection.jedis.JedisConnectionFactory;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.serializer.GenericJackson2JsonRedisSerializer;
+import org.springframework.data.redis.serializer.StringRedisSerializer;
+
+@Configuration
+public class RedisConfig {
+
+    @Bean
+    public JedisConnectionFactory jedisConnectionFactory() {
+        RedisStandaloneConfiguration config = new RedisStandaloneConfiguration();
+        config.setHostName("redis");
+        config.setPort(6379);
+        return new JedisConnectionFactory(config);
+    }
+
+    @Bean
+    public RedisTemplate<String, Object> redisTemplate(JedisConnectionFactory jedisConnectionFactory) {
+        RedisTemplate<String, Object> template = new RedisTemplate<>();
+        template.setConnectionFactory(jedisConnectionFactory);
+        template.setKeySerializer(new StringRedisSerializer());
+
+        // Configure ObjectMapper to include type info
+        ObjectMapper om = new ObjectMapper();
+        om.activateDefaultTyping(LaissezFaireSubTypeValidator.instance, ObjectMapper.DefaultTyping.NON_FINAL, JsonTypeInfo.As.PROPERTY);
+
+        GenericJackson2JsonRedisSerializer serializer = new GenericJackson2JsonRedisSerializer(om);
+        template.setValueSerializer(serializer);
+        template.setHashKeySerializer(new StringRedisSerializer());
+        template.setHashValueSerializer(serializer);
+        template.afterPropertiesSet();
+        return template;
+    }
+}
+
+--------------------------------------------------------------------------------
+
+----- FILE: config\SecurityConfig.java -----
+
+// File: C:\Projects\EchoU\backend\src\main\java\com\example\config\SecurityConfig.java
+
+package com.example.config;
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.config.annotation.authentication.configuration.AuthenticationConfiguration;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+import org.springframework.web.client.RestTemplate;
+import org.springframework.web.cors.CorsConfiguration;
+import org.springframework.web.cors.CorsConfigurationSource;
+import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
+
+import java.util.List;
+
+@Configuration
+public class SecurityConfig {
+
+    private final JwtTokenProvider jwtTokenProvider;
+    private final UserDetailsService userDetailsService;
+
+    public SecurityConfig(JwtTokenProvider jwtTokenProvider, UserDetailsService userDetailsService) {
+        this.jwtTokenProvider = jwtTokenProvider;
+        this.userDetailsService = userDetailsService;
+    }
+
+    @Bean
+    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+        http
+            .cors(cors -> cors.configurationSource(corsConfigurationSource()))
+            .csrf(csrf -> csrf.disable()) // Disable CSRF protection
+            .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+          .authorizeHttpRequests(auth -> auth
+    .requestMatchers("/api/auth/signup", "/api/auth/login", "/api/parent/auth/**", "/api/health", "/error").permitAll()
+    .requestMatchers("/api/auth/me").authenticated() 
+    .requestMatchers("/api/images/profiles/**", "/api/rides/**", "/actuator/**","/api/feedback/**").authenticated()
+    .anyRequest().authenticated()
+)
+            .addFilterBefore(new JwtAuthenticationFilter(jwtTokenProvider, userDetailsService), 
+                            UsernamePasswordAuthenticationFilter.class);
+
+        return http.build();
+    }
+
+    @Bean
+    public CorsConfigurationSource corsConfigurationSource() {
+        CorsConfiguration configuration = new CorsConfiguration();
+        configuration.setAllowedOrigins(List.of("http://localhost:3000"));
+        configuration.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS"));
+        configuration.setAllowedHeaders(List.of("Authorization", "Content-Type")); // Removed X-CSRF-Token
+        configuration.setAllowCredentials(true);
+        configuration.setMaxAge(3600L);
+
+        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+        source.registerCorsConfiguration("/**", configuration);
+        return source;
+    }
+
+    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
+    }
+
+    @Bean
+    public AuthenticationManager authenticationManager(AuthenticationConfiguration config) throws Exception {
+        return config.getAuthenticationManager();
+    }
+
+    @Bean
+    public RestTemplate restTemplate() {
+        return new RestTemplate();
+    }
+}
+
+--------------------------------------------------------------------------------
+
+==================== CONTROLLER ====================
+
+----- FILE: controller\AuthController.java -----
+
+package com.example.controller;
+
+import com.example.entity.User;
+import com.example.dto.LoginRequest;
+import com.example.dto.LoginResponse;
+import com.example.repository.UserRepository;
+import com.example.service.MinioService;
+import com.example.service.UserService;
+import jakarta.servlet.http.Cookie;
+import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.core.userdetails.UsernameNotFoundException;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
+
+import java.util.Map;
+
+@RestController
+@RequestMapping("/api/auth")
+public class AuthController {
+
+    private final UserService userService;
+    private final UserRepository userRepository;
+    private final MinioService minioService;
+
+    public AuthController(UserService userService,
+                          UserRepository userRepository,
+                          MinioService minioService) {
+        this.userService = userService;
+        this.userRepository = userRepository;
+        this.minioService = minioService;
+    }
+
+   @PostMapping("/signup")
+public ResponseEntity<?> signup(@RequestParam("username") String username,
+                                @RequestParam("password") String password,
+                                @RequestParam("profilePicture") MultipartFile profilePicture,
+                                @RequestParam(value = "phoneNumber", required = false) String phoneNumber
+    ) {
+    try {
+        if (profilePicture.isEmpty())
+            return ResponseEntity.badRequest().body("Profile picture required");
+
+        String objectName = userService.signupAndReturnObjectName(username, password, profilePicture, phoneNumber);
+        if (objectName == null)
+            return ResponseEntity.badRequest().body("No person detected or user exists");
+
+        return ResponseEntity.ok(Map.of(
+                "message", "Signup successful",
+                "avatar", objectName));
+    } catch (Exception e) {
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                             .body("Signup failed: " + e.getMessage());
+    }
+}
+
+    @PostMapping("/login")
+    public ResponseEntity<LoginResponse> login(@RequestBody LoginRequest request, HttpServletResponse response) {
+        String token = userService.login(request.getUsername(), request.getPassword());
+        if (token == null) return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+
+        User user = userRepository.findByUsername(request.getUsername());
+        String avatar = user != null ? user.getProfilePictureUrl() : "";
+        Cookie cookie = new Cookie("jwt", token);
+        cookie.setHttpOnly(true);
+        cookie.setPath("/");
+        cookie.setMaxAge(10 * 60 * 60); // 10h
+        response.addCookie(cookie);
+        return ResponseEntity.ok(new LoginResponse(null, avatar));
+    }
+
+    @GetMapping("/me")
+public ResponseEntity<Map<String, Object>> getCurrentUser() {
+    try {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        if (auth == null || !auth.isAuthenticated()) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+        }
+        String username = auth.getName();
+        User user = userRepository.findByUsername(username);
+        if (user == null) {
+            throw new UsernameNotFoundException("User not found: " + username);
+        }
+        return ResponseEntity.ok(Map.of(
+            "username", user.getUsername(),
+            "trustScore", user.getTrustScore(),
+            "avatar", user.getProfilePictureUrl(),
+            "phoneNumber", user.getPhoneNumber()
+        ));
+    } catch (UsernameNotFoundException e) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", e.getMessage()));
+    } catch (Exception e) {
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", "Error fetching user data"));
+    }
+}
+}
+
+--------------------------------------------------------------------------------
+
+----- FILE: controller\FeedbackController.java -----
+
+// backendsrc/main/java/com/example/controller/FeedbackController.java
+package com.example.controller;
+
+import com.example.dto.FeedbackRequest;
+import com.example.entity.Ride;
+import com.example.entity.User;
+import com.example.repository.RideRepository;
+import com.example.repository.UserRepository;
+import com.example.service.FeedbackService;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.core.Authentication;
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequestMapping("/api/feedback")
+public class FeedbackController {
+     private static final Logger logger = LoggerFactory.getLogger(FeedbackController.class);
+
+
+    private final FeedbackService feedbackService;
+    private final RideRepository rideRepository;
+    private final UserRepository userRepository;
+
+    public FeedbackController(
+            FeedbackService feedbackService,
+            RideRepository rideRepository,
+            UserRepository userRepository
+    ) {
+        this.feedbackService = feedbackService;
+        this.rideRepository = rideRepository;
+        this.userRepository = userRepository;
+    }
+
+    @PostMapping("/{rideId}")
+@PreAuthorize("isAuthenticated()")
+public ResponseEntity<?> submitFeedback(
+        @PathVariable Long rideId,
+        @RequestBody FeedbackRequest request,
+        Authentication auth) {
+    
+    logger.info("=== FEEDBACK ENDPOINT START === rideId={}, auth={}", rideId, auth.getName());
+
+    if (auth == null || !auth.isAuthenticated()) {
+        logger.warn("FAIL: Not authenticated");
+        return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+    }
+
+    if (request == null || request.getComment() == null || request.getComment().isBlank()) {
+        logger.warn("FAIL: Invalid request. request={}, comment={}", 
+                request != null ? "not null" : "null",
+                request != null && request.getComment() != null ? "not blank" : "blank");
+        return ResponseEntity.badRequest().body("Comment is required");
+    }
+
+    User user = userRepository.findByUsername(auth.getName());
+    if (user == null) {
+        logger.warn("FAIL: User not found by username={}", auth.getName());
+        return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body("User not found");
+    }
+    logger.info("User found. userId={}", user.getId());
+
+    Ride ride = rideRepository.findById(rideId).orElse(null);
+    if (ride == null) {
+        logger.warn("FAIL: Ride not found. rideId={}", rideId);
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body("Ride not found");
+    }
+    logger.info("Ride found. rideUserId={}, status={}", ride.getUserId(), ride.getStatus());
+
+    if (!ride.getUserId().equals(user.getId())) {
+        logger.warn("FAIL: Ownership check. rideUserId={}, userId={}", ride.getUserId(), user.getId());
+        return ResponseEntity.status(HttpStatus.FORBIDDEN).body("You do not own this ride");
+    }
+    logger.info("Ownership verified");
+
+    try {
+        feedbackService.submitFeedback(user.getId(), rideId, request.getComment());
+        logger.info("=== FEEDBACK ENDPOINT SUCCESS ===");
+        return ResponseEntity.ok().build();
+    } catch (Exception e) {
+        logger.error("=== FEEDBACK ENDPOINT FAILED ===", e);
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+    }
+}
+
+}
+
+
+--------------------------------------------------------------------------------
+
+----- FILE: controller\HealthController.java -----
+
+package com.example.controller;
+
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public class HealthController {
+
+    @GetMapping("/actuator/health")
+    public String health() {
+        return "{\"status\": \"UP\"}";
+    }
+
+    @GetMapping("/api/health")
+    public String apiHealth() {
+        return "{\"status\": \"OK\", \"message\": \"Service is running\"}";
+    }
+}
+
+--------------------------------------------------------------------------------
+
+----- FILE: controller\ImageController.java -----
+
+package com.example.controller;
+
+import com.example.entity.User;
+import com.example.repository.UserRepository;
+import com.example.service.MinioService;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+@RequestMapping("/api/images")
+@RequiredArgsConstructor
+public class ImageController {
+
+    private final MinioService minioService;
+    private final UserRepository userRepository;
+
+    @GetMapping("/profiles/{fileName}")
+    public ResponseEntity<byte[]> getProfile(@PathVariable String fileName, Authentication auth) throws Exception {
+        User user = userRepository.findByUsername(auth.getName());
+        if (user == null || !fileName.equals(user.getProfilePictureUrl())) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+        }
+        byte[] bytes = minioService.getObject("profiles", fileName);
+        return ResponseEntity.ok()
+                .contentType(MediaType.IMAGE_JPEG)
+                .body(bytes);
+    }
+}
+
+--------------------------------------------------------------------------------
+
+----- FILE: controller\ParentController.java -----
+
+// File: C:\Projects\EchoU\backend\src\main\java\com\example\controller\ParentController.java
+
+package com.example.controller;
+
+import com.example.config.JwtTokenProvider;
+import com.example.entity.Parent;
+import com.example.entity.User;
+import com.example.repository.ParentRepository;
+import com.example.repository.UserRepository;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.web.bind.annotation.*;
+import jakarta.servlet.http.Cookie;
+import jakarta.servlet.http.HttpServletResponse;
+
+import java.util.Map;
+
+@RestController
+@RequestMapping("/api/parent/auth")
+public class ParentController {
+
+    @Autowired
+    private ParentRepository parentRepository;
+
+    @Autowired
+    private UserRepository userRepository;
+
+    @Autowired
+    private PasswordEncoder passwordEncoder;
+
+    @Autowired
+    private JwtTokenProvider jwtTokenProvider;
+
+    // Parent signup: child must be logged in, and childId is set automatically
+    @PostMapping("/signup")
+    public ResponseEntity<?> signup(@RequestParam String username,
+                                    @RequestParam String password,
+                                    Authentication auth) {
+        // 1) Require a logged-in child
+        if (auth == null || !auth.isAuthenticated()) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                    .body("Child must be logged in to register a parent");
+        }
+
+        String childUsername = auth.getName();
+        User child = userRepository.findByUsername(childUsername);
+        if (child == null) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body("Child user not found");
+        }
+
+        if (child.getParentId() != null) {
+            return ResponseEntity.badRequest()
+                    .body("Child already linked to a parent");
+        }
+
+        // 2) Create parent and link to this child
+        Parent parent = new Parent();
+        parent.setUsername(username);
+        parent.setPassword(passwordEncoder.encode(password));
+        parent.setChildId(child.getId());   // ID comes from backend, not from form
+        parentRepository.save(parent);
+
+        child.setParentId(parent.getId());
+        userRepository.save(child);
+
+        return ResponseEntity.ok(Map.of("message", "Parent registered"));
+    }
+
+    // Parent login: validate against parents table and issue JWT with PARENT role
+    @PostMapping("/login")
+    public ResponseEntity<?> login(@RequestParam String username,
+                                   @RequestParam String password,
+                                   HttpServletResponse response) {
+        // 1) Validate parent credentials against parents table
+        Parent parent = parentRepository.findByUsername(username);
+        if (parent == null || !passwordEncoder.matches(password, parent.getPassword())) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+        }
+
+        // 2) Build Spring Security UserDetails with PARENT role
+        UserDetails parentDetails =
+                org.springframework.security.core.userdetails.User
+                        .withUsername(parent.getUsername())
+                        .password(parent.getPassword())  // hashed, not used at JWT validation time
+                        .authorities("PARENT")
+                        .build();
+
+        // 3) Generate JWT using JwtTokenProvider
+        String token = jwtTokenProvider.generateToken(parentDetails);  // role=PARENT claim
+        Cookie cookie = new Cookie("jwt", token);
+        cookie.setHttpOnly(true);
+        cookie.setPath("/");
+        cookie.setMaxAge(36000);
+        response.addCookie(cookie);
+
+        return ResponseEntity.ok(Map.of("message", "Logged in"));
+    }
+
+    @GetMapping("/me")
+    public ResponseEntity<Map<String, Object>> getCurrentParent() {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        if (auth == null || !auth.isAuthenticated()) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+        }
+
+        Parent parent = parentRepository.findByUsername(auth.getName());
+        if (parent == null) {
+            return ResponseEntity.notFound().build();
+        }
+
+        return ResponseEntity.ok(Map.of(
+                "username", parent.getUsername(),
+                "childLat", parent.getChildLat(),
+                "childLon", parent.getChildLon(),
+                "rideStatus", parent.getRideStatus(),
+                "partnerUsername", parent.getPartnerUsername(),
+                "partnerPhone", parent.getPartnerPhone(),
+                "childRideId", parent.getChildRideId()
+        ));
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+----- FILE: controller\RideController.java -----
+
+// backend/src/main/java/com/example/controller/RideController.java (Moved geocode/reverse to service, updated RideResponse construction, added match request endpoints)
+package com.example.controller;
+import com.example.entity.Ride.RideStatus;
+import com.example.dto.RideMatchRequestResponse;
+import com.example.dto.RideMatchResponse;
+import com.example.dto.RideRequest;
+import com.example.dto.RideResponse;
+import com.example.entity.Ride;
+import com.example.entity.Parent; // CHANGE: Added import
+import com.example.entity.Ride.RideStatus;
+
+import com.example.repository.ParentRepository; // CHANGE: Added import
+import com.example.entity.RideMatch;
+import com.example.entity.RideMatchRequest;
+import com.example.entity.User;
+import com.example.repository.RideMatchRepository;
+import com.example.repository.RideMatchRequestRepository;
+import com.example.repository.RideRepository;
+import com.example.repository.UserRepository;
+import com.example.service.RideService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.core.Authentication;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.client.RestTemplate;
+
+import java.util.*;
+import java.util.stream.Collectors;
+
+@RestController
+@RequestMapping("/api/rides")
+public class RideController {
+    private static final Logger logger = LoggerFactory.getLogger(RideController.class);
+    private final RideService rideService;
+    private final RestTemplate restTemplate;
+    private final RedisTemplate<String, Object> redisTemplate;
+    private final RideMatchRepository rideMatchRepository;
+    private final RideRepository rideRepository;
+    private final UserRepository userRepository;
+    private final RideMatchRequestRepository rideMatchRequestRepository;
+    private final ParentRepository parentRepository;
+
+    public RideController(RideService rideService, RideRepository rideRepository, UserRepository userRepository,
+                          RideMatchRepository rideMatchRepository, RideMatchRequestRepository rideMatchRequestRepository, RestTemplate restTemplate, ParentRepository parentRepository,
+                          RedisTemplate<String, Object> redisTemplate) {
+        this.rideService = rideService;
+        this.restTemplate = restTemplate;
+        this.redisTemplate = redisTemplate;
+        this.rideMatchRepository = rideMatchRepository;
+        this.rideRepository = rideRepository;
+        this.userRepository = userRepository;
+        this.rideMatchRequestRepository = rideMatchRequestRepository;
+        this.parentRepository = parentRepository; // CHANGE: Assigned
+    }
+
+    @PostMapping("/request")
+    @PreAuthorize("isAuthenticated()")
+    public ResponseEntity<RideResponse> requestRide(@RequestBody RideRequest request) {
+        try {
+            Ride ride = rideService.createRide(request);
+            RideResponse response = new RideResponse(
+                ride.getId(),
+                ride.getPickupLat(),
+                ride.getPickupLon(),
+                ride.getDropoffLat(),
+                ride.getDropoffLon(),
+                ride.getStatus().name(),
+                ride.getCarbonEstimate(),
+                ride.getH3Index(),
+                ride.getUserId(),
+                ride.getPickupAddress(),
+                ride.getDropoffAddress()
+            );
+            return ResponseEntity.ok(response);
+        } catch (IllegalArgumentException e) {
+            logger.warn("Invalid ride request: {}", e.getMessage());
+            return ResponseEntity.badRequest().body(null);
+        } catch (Exception e) {
+            logger.error("Ride request failed", e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+
+    @GetMapping("/geocode")
+    public ResponseEntity<Map<String, Double>> geocode(@RequestParam String address) {
+        Map<String, Double> location = rideService.geocode(address);
+        if (location == null) {
+            return ResponseEntity.badRequest().build();
+        }
+        return ResponseEntity.ok(location);
+    }
+
+    @GetMapping("/reverse-geocode")
+    public ResponseEntity<Map<String, String>> reverseGeocode(@RequestParam double lat, @RequestParam double lon) {
+        Map<String, String> location = rideService.reverseGeocode(lat, lon);
+        return ResponseEntity.ok(location);
+    }
+@PostMapping("/match/start/{requestId}")
+@PreAuthorize("isAuthenticated()")
+@Transactional 
+public ResponseEntity<String> startMatch(@PathVariable Long requestId, Authentication auth) {
+    try {
+         logger.info("Start match called: requestId={}, user={}", requestId, auth.getName());
+        RideMatchRequest request = rideMatchRequestRepository.findById(requestId).orElseThrow();
+        logger.info("Request status={}, fromConfirmed={}, toConfirmed={}", 
+                   request.getStatus(), request.isStartConfirmedFrom(), request.isStartConfirmedTo());  
+        User user = userRepository.findByUsername(auth.getName());
+        Ride fromRide = rideRepository.findById(request.getFromRideId()).orElseThrow();
+        Ride toRide = rideRepository.findById(request.getToRideId()).orElseThrow();
+        
+        Ride userRide;
+        if (fromRide.getUserId().equals(user.getId())) {
+            userRide = fromRide;
+        } else if (toRide.getUserId().equals(user.getId())) {
+            userRide = toRide;
+        } else {
+            logger.info("User {} does not own either ride in request {}", user.getUsername(), requestId);
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+        }
+        
+        if (request.getStatus() == RideStatus.CONFIRMED) {
+            if (userRide.getId().equals(request.getFromRideId())) {
+                request.setStartConfirmedFrom(true);
+            } else {
+                request.setStartConfirmedTo(true);
+            }
+            rideMatchRequestRepository.save(request);
+            if (request.isStartConfirmedFrom() && request.isStartConfirmedTo()) {
+                logger.info("Both confirmed - setting INPROGRESS");
+                rideRepository.findById(request.getFromRideId()).ifPresent(r -> { r.setStatus(RideStatus.IN_PROGRESS); rideRepository.save(r); });
+                rideRepository.findById(request.getToRideId()).ifPresent(r -> { r.setStatus(RideStatus.IN_PROGRESS); rideRepository.save(r); });
+                return ResponseEntity.ok("Journey started for both!");
+            }
+            return ResponseEntity.ok("Start confirmed. Waiting for partner.");
+        }
+        logger.info("Request status EXACT: '{}'", request.getStatus());
+        return ResponseEntity.badRequest().body("Invalid status");
+    } catch (Exception e) {
+        logger.error("Failed to start match: {}", e.getMessage());
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+    }
+}
+@PostMapping("/{rideId}/location")
+@PreAuthorize("isAuthenticated()")
+public ResponseEntity<?> updateLocation(@PathVariable Long rideId, @RequestParam double lat, @RequestParam double lon, Authentication auth) {
+    Ride ride = rideRepository.findById(rideId).orElseThrow();
+    ride.setCurrentLat(lat);
+    ride.setCurrentLon(lon);
+    rideRepository.save(ride);
+    User child = userRepository.findByUsername(auth.getName());
+    if (child.getParentId() != null) {
+        Parent parent = parentRepository.findById(child.getParentId()).orElse(null);
+        if (parent != null) {
+            parent.setChildLat(lat);
+            parent.setChildLon(lon);
+            parent.setRideStatus(ride.getStatus().name());
+            parent.setChildRideId(rideId);
+            
+            // FIXED: Find active/completed match requests where this ride is either 'from' or 'to'
+            // Query for CONFIRMED (covers IN_PROGRESS rides) and COMPLETED statuses
+            List<RideMatchRequest> matches = new ArrayList<>();
+            matches.addAll(rideMatchRequestRepository.findByFromRideIdInAndStatus(List.of(rideId), RideStatus.CONFIRMED));
+            matches.addAll(rideMatchRequestRepository.findByToRideIdInAndStatus(List.of(rideId), RideStatus.CONFIRMED));
+            matches.addAll(rideMatchRequestRepository.findByFromRideIdInAndStatus(List.of(rideId), RideStatus.COMPLETED));
+            matches.addAll(rideMatchRequestRepository.findByToRideIdInAndStatus(List.of(rideId), RideStatus.COMPLETED));
+            
+            // If any match found (assume at most one active match per ride)
+            RideMatchRequest matchReq = !matches.isEmpty() ? matches.get(0) : null;
+            if (matchReq != null && ("IN_PROGRESS".equals(ride.getStatus().name()) || "COMPLETED".equals(ride.getStatus().name()))) {
+                // Determine partner ride ID (the other one in the match)
+                Long partnerRideId = rideId.equals(matchReq.getFromRideId()) ? matchReq.getToRideId() : matchReq.getFromRideId();
+                Ride partnerRide = rideRepository.findById(partnerRideId).orElse(null);
+                if (partnerRide != null) {
+                    User partnerUser = userRepository.findById(partnerRide.getUserId()).orElse(null);
+                    if (partnerUser != null) {
+                        parent.setPartnerUsername(partnerUser.getUsername());
+                        parent.setPartnerPhone(partnerUser.getPhoneNumber());
+                    }
+                }
+            }
+            parentRepository.save(parent);
+        }
+    }
+    return ResponseEntity.ok().build();
+}
+// inside RideController
+
+@PostMapping("match/end/{requestId}")
+@PreAuthorize("isAuthenticated()")
+@Transactional
+public ResponseEntity<?> endMatch(@PathVariable Long requestId, Authentication auth) {
+    try {
+        RideMatchRequest request = rideMatchRequestRepository.findById(requestId).orElseThrow();
+        User user = userRepository.findByUsername(auth.getName());
+        Ride fromRide = rideRepository.findById(request.getFromRideId()).orElseThrow();
+        Ride toRide = rideRepository.findById(request.getToRideId()).orElseThrow();
+
+        Ride userRide;
+        if (fromRide.getUserId().equals(user.getId())) {
+            userRide = fromRide;
+        } else if (toRide.getUserId().equals(user.getId())) {
+            userRide = toRide;
+        } else {
+            logger.info("User does not own either ride in request {} - {}", user.getUsername(), requestId);
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+        }
+
+       // Allow journey end while request is still CONFIRMED
+if (request.getStatus().equals(RideStatus.CONFIRMED)
+        || request.getStatus().equals(RideStatus.COMPLETED)) { // optional for idempotency
+    if (userRide.getId().equals(request.getFromRideId())) {
+        request.setEndConfirmedFrom(true);
+    } else {
+        request.setEndConfirmedTo(true);
+    }
+    rideMatchRequestRepository.save(request);
+
+    if (request.isEndConfirmedFrom() && request.isEndConfirmedTo()) {
+        // Mark both rides completed
+        rideRepository.findById(request.getFromRideId())
+                .ifPresent(r -> { r.setStatus(RideStatus.COMPLETED); rideRepository.save(r); });
+        rideRepository.findById(request.getToRideId())
+                .ifPresent(r -> { r.setStatus(RideStatus.COMPLETED); rideRepository.save(r); });
+
+        // Mark the match request completed (needed by FeedbackService.resolvePartnerUserId)
+        request.setStatus(RideStatus.COMPLETED);
+        rideMatchRequestRepository.save(request);
+
+        return ResponseEntity.ok(Map.of(
+                "message", "Journey completed!",
+                "rideId", userRide.getId()
+        ));
+    }
+
+    return ResponseEntity.ok(Map.of(
+            "message", "End confirmed. Waiting for partner.",
+            "rideId", userRide.getId()
+    ));
+}
+
+
+        return ResponseEntity.badRequest().body(Map.of("error", "Invalid status"));
+
+    } catch (Exception e) {
+        logger.error("Failed to end match {}", requestId, e);
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+    }
+}
+
+@GetMapping("/child-status")
+    @PreAuthorize("isAuthenticated()")
+    public ResponseEntity<Map<String, Object>> getChildStatus(Authentication auth) {
+        Parent parent = parentRepository.findByUsername(auth.getName());
+        if (parent == null) return ResponseEntity.notFound().build();
+        return ResponseEntity.ok(Map.of(
+            "childLat", parent.getChildLat(),
+            "childLon", parent.getChildLon(),
+            "rideStatus", parent.getRideStatus(),
+            "partnerUsername", parent.getPartnerUsername(),
+            "partnerPhone", parent.getPartnerPhone(),
+            "childRideId", parent.getChildRideId()
+        ));
+    }
+@GetMapping("/active")
+@PreAuthorize("isAuthenticated()")
+public ResponseEntity<RideResponse> getActiveRide(Authentication auth) {
+    try {
+        Long userId = userRepository.findByUsername(auth.getName()).getId();
+        List<Ride> userRides = rideRepository.findByUserIdAndStatus(userId, RideStatus.IN_PROGRESS);
+        if (userRides.isEmpty()) {
+            return ResponseEntity.ok(null); // No active
+        }
+        Ride ride = userRides.get(0); // Assume one active
+        return ResponseEntity.ok(new RideResponse(ride.getId(), ride.getPickupLat(), ride.getPickupLon(), ride.getDropoffLat(), ride.getDropoffLon(), ride.getStatus().name(), ride.getCarbonEstimate(), ride.getH3Index(), ride.getUserId(), ride.getPickupAddress(), ride.getDropoffAddress()));
+    } catch (Exception e) {
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+    }
+}
+
+@GetMapping("/distance")
+@PreAuthorize("isAuthenticated()")
+public ResponseEntity<Map<String, Object>> distance(
+        @RequestParam double fromLat,
+        @RequestParam double fromLon,
+        @RequestParam double toLat,
+        @RequestParam double toLon
+) {
+    try {
+        // OSRM format: lon,lat;lon,lat  (NOT lat,lon) [web:25]
+        String coords = String.format(Locale.US, "%f,%f;%f,%f", fromLon, fromLat, toLon, toLat);
+        String url = "http://router.project-osrm.org/route/v1/driving/" + coords
+                + "?overview=false&steps=false&alternatives=false";
+
+        Map<?, ?> osrm = restTemplate.getForObject(url, Map.class);
+
+        double distanceMeters = 0.0;
+        double durationSeconds = 0.0;
+
+        if (osrm != null && osrm.get("routes") instanceof List<?> routes && !routes.isEmpty()) {
+            Object r0 = routes.get(0);
+            if (r0 instanceof Map<?, ?> route) {
+                Object distObj = route.get("distance");  // meters [web:24]
+                Object durObj  = route.get("duration");  // seconds [web:24]
+                if (distObj instanceof Number) distanceMeters = ((Number) distObj).doubleValue();
+                if (durObj instanceof Number) durationSeconds = ((Number) durObj).doubleValue();
+            }
+        }
+
+        double distanceKm = Math.round((distanceMeters / 1000.0) * 10.0) / 10.0;
+        double durationMin = Math.round((durationSeconds / 60.0) * 10.0) / 10.0;
+
+        return ResponseEntity.ok(Map.of(
+                "distanceKm", distanceKm,
+                "durationMin", durationMin
+        ));
+    } catch (Exception e) {
+        logger.error("Distance API failed: {}", e.getMessage());
+        return ResponseEntity.status(HttpStatus.BAD_GATEWAY)
+                .body(Map.of("distanceKm", 0.0, "durationMin", 0.0));
+    }
+}
+
+    @GetMapping("/{rideId}")
+    @PreAuthorize("isAuthenticated()")
+    public ResponseEntity<RideResponse> getRide(@PathVariable Long rideId, Authentication auth) {
+        try {
+            Ride ride = rideRepository.findById(rideId).orElse(null);
+            if (ride == null || !ride.getUserId().equals(userRepository.findByUsername(auth.getName()).getId())) {
+                return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+            }
+            return ResponseEntity.ok(new RideResponse(ride.getId(), ride.getPickupLat(), ride.getPickupLon(), ride.getDropoffLat(), ride.getDropoffLon(), ride.getStatus().name(), ride.getCarbonEstimate(), ride.getH3Index(), ride.getUserId(), ride.getPickupAddress(), ride.getDropoffAddress()));
+        } catch (Exception e) {
+            logger.error("Failed to fetch ride {}: {}", rideId, e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+
+    @GetMapping
+    @PreAuthorize("isAuthenticated()")
+    public ResponseEntity<List<RideResponse>> getUserRides(Authentication auth) {
+        try {
+            Long userId = userRepository.findByUsername(auth.getName()).getId();
+
+            logger.info("Fetching rides for user '{}' (ID: {})", auth.getName(), userId);
+List<Ride> rides = rideRepository.findByUserId(userId);
+logger.info("Found {} rides for user ID {}", rides.size(), userId);
+            List<RideResponse> responses = rides.stream()
+                    .map(r -> new RideResponse(r.getId(), r.getPickupLat(), r.getPickupLon(), r.getDropoffLat(), r.getDropoffLon(), r.getStatus().name(), r.getCarbonEstimate(), r.getH3Index(), r.getUserId(), r.getPickupAddress(), r.getDropoffAddress()))
+                    .collect(Collectors.toList());
+            return ResponseEntity.ok(responses);
+        } catch (Exception e) {
+            logger.error("Failed to fetch rides: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+@GetMapping("/match/{rideId}")
+public ResponseEntity<RideResponse> getMatchRide(@PathVariable Long rideId) {
+    try {
+        Ride ride = rideRepository.findById(rideId).orElse(null);
+        if (ride == null) {
+            return ResponseEntity.notFound().build();
+        }
+        return ResponseEntity.ok(new RideResponse(ride.getId(), ride.getPickupLat(), ride.getPickupLon(), ride.getDropoffLat(), ride.getDropoffLon(), ride.getStatus().name(), ride.getCarbonEstimate(), ride.getH3Index(), ride.getUserId(), ride.getPickupAddress(), ride.getDropoffAddress()));
+    } catch (Exception e) {
+        logger.error("Failed to fetch match ride {}: {}", rideId, e.getMessage());
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+    }
+}
+    @GetMapping("/matches/{rideId}")
+    @PreAuthorize("isAuthenticated()")
+    public ResponseEntity<List<RideMatchResponse>> getMatches(@PathVariable Long rideId, Authentication auth) {
+        try {
+            Ride ride = rideRepository.findById(rideId).orElse(null);
+            if (ride == null || !ride.getUserId().equals(userRepository.findByUsername(auth.getName()).getId())) {
+                return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+            }
+            List<RideMatch> matches = rideMatchRepository.findByRideId(rideId);
+            List<RideMatchResponse> responses = new ArrayList<>();
+            for (RideMatch match : matches) {
+                responses.add(new RideMatchResponse(match.getRideId(), match.getMatchedRideIds(), match.getClusterId()));
+            }
+            return ResponseEntity.ok(responses);
+        } catch (Exception e) {
+            logger.error("Failed to get matches for ride {}: {}", rideId, e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+
+    @PostMapping("/match/request")
+    @PreAuthorize("isAuthenticated()")
+    public ResponseEntity<String> requestMatch(@RequestBody Map<String, Long> body, Authentication auth) {
+        Long rideId = body.get("rideId");
+        Long matchedRideId = body.get("matchedRideId");
+        try {
+            Ride ride = rideRepository.findById(rideId).orElseThrow();
+            Ride matchedRide = rideRepository.findById(matchedRideId).orElseThrow();
+            User user = userRepository.findByUsername(auth.getName());
+            if (!ride.getUserId().equals(user.getId())) {
+                return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+            }
+            RideMatchRequest existing = rideMatchRequestRepository.findByFromRideIdAndToRideId(rideId, matchedRideId);
+            if (existing != null) {
+                return ResponseEntity.badRequest().body("Request already sent");
+            }
+            RideMatchRequest request = new RideMatchRequest();
+            request.setFromRideId(rideId);
+            request.setToRideId(matchedRideId);
+            request.setStatus(RideStatus.PENDING);
+            rideMatchRequestRepository.save(request);
+            logger.info("Match request from rideId={}, to matchedRideId={}, user={}", rideId, matchedRideId, auth.getName());
+            return ResponseEntity.ok("Request sent");
+        } catch (Exception e) {
+            logger.error("Failed to send match request: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+
+    }
+
+    @GetMapping("/requests/incoming")
+    @PreAuthorize("isAuthenticated()")
+    public ResponseEntity<List<RideMatchRequestResponse>> getIncomingRequests(Authentication auth) {
+        try {
+            Long userId = userRepository.findByUsername(auth.getName()).getId();
+            List<Ride> userRides = rideRepository.findByUserId(userId);
+            List<Long> userRideIds = userRides.stream().map(Ride::getId).collect(Collectors.toList());
+            List<RideMatchRequest> requests = rideMatchRequestRepository.findByToRideIdInAndStatus(userRideIds, RideStatus.PENDING);
+            List<RideMatchRequestResponse> responses = requests.stream()
+                    .map(r -> new RideMatchRequestResponse(r.getId(), r.getFromRideId(), r.getToRideId(), r.getStatus()))
+                    .collect(Collectors.toList());
+            logger.info("Fetching incoming requests for userId={}, found {} requests", userId, requests.size());
+
+            return ResponseEntity.ok(responses);
+        } catch (Exception e) {
+            logger.error("Failed to fetch incoming requests: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+
+@GetMapping("/matches/confirmed")
+@PreAuthorize("isAuthenticated()")
+public ResponseEntity<List<RideMatchRequestResponse>> getConfirmedMatches(Authentication auth) {
+    try {
+        Long userId = userRepository.findByUsername(auth.getName()).getId();
+        List<Ride> userRides = rideRepository.findByUserId(userId);
+        List<Long> userRideIds = userRides.stream().map(Ride::getId).collect(Collectors.toList());
+        List<RideMatchRequest> requests = rideMatchRequestRepository.findByToRideIdInAndStatus(userRideIds, RideStatus.CONFIRMED);
+        requests.addAll(rideMatchRequestRepository.findByFromRideIdInAndStatus(userRideIds, RideStatus.CONFIRMED));
+        requests = requests.stream().filter(r -> !RideStatus.COMPLETED.equals(r.getStatus())).collect(Collectors.toList()); // Filter completed
+        List<RideMatchRequestResponse> responses = requests.stream()
+                .map(r -> new RideMatchRequestResponse(r.getId(), r.getFromRideId(), r.getToRideId(), r.getStatus()))
+                .collect(Collectors.toList());
+        return ResponseEntity.ok(responses);
+    } catch (Exception e) {
+        logger.error("Failed to fetch confirmed matches: {}", e.getMessage());
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+    }
+}
+
+    @PostMapping("/match/confirm/{requestId}")
+    @PreAuthorize("isAuthenticated()")
+    public ResponseEntity<String> confirmMatch(@PathVariable Long requestId, Authentication auth) {
+        try {
+            RideMatchRequest request = rideMatchRequestRepository.findById(requestId).orElseThrow();
+            Ride toRide = rideRepository.findById(request.getToRideId()).orElseThrow();
+            User user = userRepository.findByUsername(auth.getName());
+            if (!toRide.getUserId().equals(user.getId())) {
+                return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+            }
+            request.setStatus(RideStatus.CONFIRMED);
+            rideMatchRequestRepository.save(request);
+            return ResponseEntity.ok("Match confirmed");
+        } catch (Exception e) {
+            logger.error("Failed to confirm match: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+
+    @PostMapping("/match/reject/{requestId}")
+    @PreAuthorize("isAuthenticated()")
+    public ResponseEntity<String> rejectMatch(@PathVariable Long requestId, Authentication auth) {
+        try {
+            RideMatchRequest request = rideMatchRequestRepository.findById(requestId).orElseThrow();
+            Ride toRide = rideRepository.findById(request.getToRideId()).orElseThrow();
+            User user = userRepository.findByUsername(auth.getName());
+            if (!toRide.getUserId().equals(user.getId())) {
+                return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+            }
+            request.setStatus(RideStatus.CANCELLED);
+            rideMatchRequestRepository.save(request);
+            return ResponseEntity.ok("Match rejected");
+        } catch (Exception e) {
+            logger.error("Failed to reject match: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+}
+
+--------------------------------------------------------------------------------
+
+----- FILE: controller\UserController.java -----
+
+// New: backend/src/main/java/com/example/controller/UserController.java
+package com.example.controller;
+
+import com.example.dto.UserProfileResponse;
+import com.example.repository.UserRepository;
+
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+@RequestMapping("/api/users")
+public class UserController {
+    private final UserRepository userRepository;
+
+    public UserController(UserRepository userRepository) {
+        this.userRepository = userRepository;
+    }
+
+    @GetMapping("/{id}")
+    @PreAuthorize("isAuthenticated()")
+    public ResponseEntity<UserProfileResponse> getUser(@PathVariable Long id) {
+        return userRepository.findById(id)
+                .map(u -> ResponseEntity.ok(new UserProfileResponse(u.getId(), u.getUsername(), u.getTrustScore(), u.getProfilePictureUrl(),u.getPhoneNumber(),u.getParentId())))
+                .orElse(ResponseEntity.notFound().build());
+    }
+}
+
+--------------------------------------------------------------------------------
+
+==================== DTO ====================
+
+----- FILE: dto\ClusterResponse.java -----
+
+package com.example.dto;
+
+public class ClusterResponse {
+    private Long ride_id;
+    private Double lat;
+    private Double lon;
+    private Integer trust_score;
+    private Integer cluster;
+
+    // Getters and Setters
+    public Long getRide_id() {
+        return ride_id;
+    }
+
+    public void setRide_id(Long ride_id) {
+        this.ride_id = ride_id;
+    }
+
+    public Double getLat() {
+        return lat;
+    }
+
+    public void setLat(Double lat) {
+        this.lat = lat;
+    }
+
+    public Double getLon() {
+        return lon;
+    }
+
+    public void setLon(Double lon) {
+        this.lon = lon;
+    }
+
+    public Integer getTrust_score() {
+        return trust_score;
+    }
+
+    public void setTrust_score(Integer trust_score) {
+        this.trust_score = trust_score;
+    }
+
+    public Integer getCluster() {
+        return cluster;
+    }
+
+    public void setCluster(Integer cluster) {
+        this.cluster = cluster;
+    }
+}
+
+--------------------------------------------------------------------------------
+
+----- FILE: dto\FeedbackRequest.java -----
+
+// backendsrc/main/java/com/example/dto/FeedbackRequest.java
+package com.example.dto;
+
+public class FeedbackRequest {
+    private String comment;
+
+    public FeedbackRequest() {}
+
+    public FeedbackRequest(String comment) {
+        this.comment = comment;
+    }
+
+    public String getComment() {
+        return comment;
+    }
+
+    public void setComment(String comment) {
+        this.comment = comment;
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+----- FILE: dto\LoginRequest.java -----
+
+package com.example.dto;
+
+public class LoginRequest {
+  private String username;
+  private String password;
+
+  // Getters and Setters
+  public String getUsername() {
+    return username;
+  }
+
+  public void setUsername(String username) {
+    this.username = username;
+  }
+
+  public String getPassword() {
+    return password;
+  }
+
+  public void setPassword(String password) {
+    this.password = password;
+  }
+}
+
+--------------------------------------------------------------------------------
+
+----- FILE: dto\LoginResponse.java -----
+
+package com.example.dto;
+
+import lombok.AllArgsConstructor;
+import lombok.Getter;
+
+@Getter
+@AllArgsConstructor
+public class LoginResponse {
+    private final String token;
+    private final String avatar;   // object name only
+}
+
+--------------------------------------------------------------------------------
+
+----- FILE: dto\RideMatchRequestResponse.java -----
+
+// backend/src/main/java/com/example/dto/RideMatchRequestResponse.java (New DTO)
+package com.example.dto;
+
+import com.example.entity.Ride.RideStatus;
+
+public class RideMatchRequestResponse {
+    private Long id;
+    private Long fromRideId;
+    private Long toRideId;
+    private RideStatus status;
+
+    public RideMatchRequestResponse(Long id, Long fromRideId, Long toRideId, RideStatus status) {
+        this.id = id;
+        this.fromRideId = fromRideId;
+        this.toRideId = toRideId;
+        this.status = status;
+    }
+
+    public Long getId() { return id; }
+    public Long getFromRideId() { return fromRideId; }
+    public Long getToRideId() { return toRideId; }
+    public RideStatus getStatus() { return status; }
+}
+
+--------------------------------------------------------------------------------
+
+----- FILE: dto\RideMatchResponse.java -----
+
+// backend/src/main/java/com/example/dto/RideMatchResponse.java
+package com.example.dto;
+
+import java.util.List;
+
+public class RideMatchResponse {
+    private Long rideId;
+    private List<Long> matchedRideIds;
+    private int clusterId;
+
+    public RideMatchResponse(Long rideId, List<Long> matchedRideIds, int clusterId) {
+        this.rideId = rideId;
+        this.matchedRideIds = matchedRideIds;
+        this.clusterId = clusterId;
+    }
+
+    // Getters
+    public Long getRideId() { return rideId; }
+    public List<Long> getMatchedRideIds() { return matchedRideIds; }
+    public int getClusterId() { return clusterId; }
+}
+
+--------------------------------------------------------------------------------
+
+----- FILE: dto\RideRequest.java -----
+
+package com.example.dto;
+
+public class RideRequest {
+    private double pickupLat;
+    private double pickupLon;
+    private double dropoffLat;
+    private double dropoffLon;
+
+    // Getters
+    public double getPickupLat() {
+        return pickupLat;
+    }
+
+    public double getPickupLon() {
+        return pickupLon;
+    }
+
+    public double getDropoffLat() {
+        return dropoffLat;
+    }
+
+    public double getDropoffLon() {
+        return dropoffLon;
+    }
+
+    // Setters
+    public void setPickupLat(double pickupLat) {
+        this.pickupLat = pickupLat;
+    }
+
+    public void setPickupLon(double pickupLon) {
+        this.pickupLon = pickupLon;
+    }
+
+    public void setDropoffLat(double dropoffLat) {
+        this.dropoffLat = dropoffLat;
+    }
+
+    public void setDropoffLon(double dropoffLon) {
+        this.dropoffLon = dropoffLon;
+    }
+}
+
+--------------------------------------------------------------------------------
+
+----- FILE: dto\RideResponse.java -----
+
+// backend/src/main/java/com/example/dto/RideResponse.java
+package com.example.dto;
+
+public class RideResponse {
+    private Long id;
+    private double pickupLat;
+    private double pickupLon;
+    private double dropoffLat;
+    private double dropoffLon;
+    private String status;
+    private double carbonEstimate;
+    private String h3Index;
+    private Long userId;
+    private String pickupAddress;
+    private String dropoffAddress;
+
+    public RideResponse(Long id, double pickupLat, double pickupLon, double dropoffLat, double dropoffLon,
+                        String status, double carbonEstimate, String h3Index, Long userId,
+                        String pickupAddress, String dropoffAddress) {
+        this.id = id;
+        this.pickupLat = pickupLat;
+        this.pickupLon = pickupLon;
+        this.dropoffLat = dropoffLat;
+        this.dropoffLon = dropoffLon;
+        this.status = status;
+        this.carbonEstimate = carbonEstimate;
+        this.h3Index = h3Index;
+        this.userId = userId;
+        this.pickupAddress = pickupAddress;
+        this.dropoffAddress = dropoffAddress;
+    }
+
+    // --- ALL Getters are required for JSON serialization ---
+    public Long getId() { return id; }
+    public double getPickupLat() { return pickupLat; }
+    public double getPickupLon() { return pickupLon; }
+    public double getDropoffLat() { return dropoffLat; }
+    public double getDropoffLon() { return dropoffLon; }
+    public String getStatus() { return status; }
+    public double getCarbonEstimate() { return carbonEstimate; }
+    public String getH3Index() { return h3Index; }
+    public Long getUserId() { return userId; }
+    public String getPickupAddress() { return pickupAddress; }
+    public String getDropoffAddress() { return dropoffAddress; }
+}
+
+--------------------------------------------------------------------------------
+
+----- FILE: dto\SignupRequest.java -----
+
+package com.example.dto;
+
+import org.springframework.web.multipart.MultipartFile;
+
+public class SignupRequest {
+  private String username;
+  private String password;
+  private MultipartFile profilePicture;
+  private String phoneNumber;
+
+
+
+  public SignupRequest(String username, String password, MultipartFile profilePicture, String phoneNumber) {
+    this.username = username;
+    this.password = password;
+    this.profilePicture = profilePicture;
+    this.phoneNumber = phoneNumber;
+   
+  
+  }
+
+  // Getters
+  public String getUsername() { return username; }
+  public String getPassword() { return password; }
+  public MultipartFile getProfilePicture() { return profilePicture; }
+  public String getPhoneNumber() { return phoneNumber; }
+
+  
+  
+}
+
+--------------------------------------------------------------------------------
+
+----- FILE: dto\UserProfileResponse.java -----
+
+// New: backend/src/main/java/com/example/dto/UserProfileResponse.java
+package com.example.dto;
+
+public class UserProfileResponse {
+    private Long id;
+    private String username;
+    private int trustScore;
+    private String profilePictureUrl;
+     private String phoneNumber;
+    private Long parentId;
+
+    public UserProfileResponse(Long id, String username, int trustScore, String profilePictureUrl,String phoneNumber,Long parentId) {
+        this.id = id;
+        this.username = username;
+        this.trustScore = trustScore;
+        this.profilePictureUrl = profilePictureUrl;
+        this.phoneNumber=phoneNumber;
+        this.parentId=parentId;
+    }
+
+    public Long getId() {
+        return id;
+    }
+    public Long parentId(){
+        return parentId;
+    }
+    public String phoneNumber(){
+        return phoneNumber;
+    }
+
+    public String getUsername() {
+        return username;
+    }
+
+    public int getTrustScore() {
+        return trustScore;
+    }
+
+    public String getProfilePictureUrl() {
+        return profilePictureUrl;
+    }
+}
+
+--------------------------------------------------------------------------------
+
+==================== ENTITY ====================
+
+----- FILE: entity\Feedback.java -----
+
+package com.example.entity;
+
+import java.sql.Date;
+
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.Id;
+import jakarta.persistence.Table;
+
+// new entity: Feedback.java
+@Entity
+@Table(name = "feedbacks")
+public class Feedback {
+    @Id @GeneratedValue
+    private long id;
+
+    @Column(nullable = false)
+    private long fromUserId;
+
+    @Column(nullable = false)
+    private long toUserId;   // the partner being rated
+
+    @Column(nullable = false)
+    private long rideId;
+
+    @Column(length = 2000)
+    private String comment;
+
+    @Column
+    private double sentimentScore; // [-1, 1], optional to persist
+
+    @Column
+    private double weight; // V, optional
+
+    @Column
+    private Date createdAt;
+
+    // Getters and Setters
+    public long getId() { return id; }
+    public void setId(long id) { this.id = id; }
+    public long getFromUserId() { return fromUserId; }
+    public void setFromUserId(long fromUserId) { this.fromUserId = fromUserId; }
+    public long getToUserId() { return toUserId; }
+    public void setToUserId(long toUserId) { this.toUserId = toUserId; }
+    public long getRideId() { return rideId; }
+    public void setRideId(long rideId) { this.rideId = rideId; }
+    public String getComment() { return comment; }  
+    public void setComment(String comment) { this.comment = comment; }
+    public double getSentimentScore() { return sentimentScore; }
+    public void setSentimentScore(double sentimentScore) { this.sentimentScore = sentimentScore; }
+    public double getWeight() { return weight; }
+    public void setWeight(double weight) { this.weight = weight; }
+    public Date getCreatedAt() { return createdAt; }
+    public void setCreatedAt(java.util.Date createdAt) { this.createdAt = (Date) createdAt; }
+
+
+    // timestamps, getters, setters...
+}
+
+
+
+--------------------------------------------------------------------------------
+
+----- FILE: entity\Parent.java -----
+
+// File: C:\Projects\EchoU\backend\src\main\java\com\example\entity\Parent.java (new file)
+
+package com.example.entity;
+
+import jakarta.persistence.*;
+
+@Entity
+@Table(name = "parents")
+public class Parent {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+    @Column
+    private String username;
+    @Column
+    private String password;
+
+    @Column
+    private Long childId;
+
+    @Column
+    private double childLat = 0.0;
+
+    @Column
+    private double childLon = 0.0;
+
+    @Column
+    private String rideStatus = "IDLE";
+
+    @Column
+    private String partnerUsername;
+
+    @Column
+    private String partnerPhone;
+
+    @Column
+    private Long childRideId;
+
+    public Long getId() { return id; }
+    public void setId(Long id) { this.id = id; }
+    public String getUsername() { return username; }
+    public void setUsername(String username) { this.username = username; }
+    public String getPassword() { return password; }
+    public void setPassword(String password) { this.password = password; }
+    public Long getChildId() { return childId; }
+    public void setChildId(Long childId) { this.childId = childId; }
+    public double getChildLat() { return childLat; }
+    public void setChildLat(double childLat) { this.childLat = childLat; }
+    public double getChildLon() { return childLon; }
+    public void setChildLon(double childLon) { this.childLon = childLon; }
+    public String getRideStatus() { return rideStatus; }
+    public void setRideStatus(String rideStatus) { this.rideStatus = rideStatus; }
+    public String getPartnerUsername() { return partnerUsername; }
+    public void setPartnerUsername(String partnerUsername) { this.partnerUsername = partnerUsername; }
+    public String getPartnerPhone() { return partnerPhone; }
+    public void setPartnerPhone(String partnerPhone) { this.partnerPhone = partnerPhone; }
+    public Long getChildRideId() { return childRideId; }
+    public void setChildRideId(Long childRideId) { this.childRideId = childRideId; }
+}
+
+--------------------------------------------------------------------------------
+
+----- FILE: entity\Ride.java -----
+
+// backend/src/main/java/com/example/entity/Ride.java (Added pickupAddress and dropoffAddress)
+package com.example.entity;
+
+import java.time.LocalDateTime;
+
+import org.hibernate.annotations.CreationTimestamp;
+
+import jakarta.persistence.*;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+
+@Entity
+@Table(name = "rides", indexes = {
+    @Index(name = "idx_status", columnList = "status"),
+    @Index(name = "idx_h3index", columnList = "h3_index"),
+    @Index(name = "idx_user_id", columnList = "user_id")
+})
+public class Ride {
+    public enum RideStatus {
+    PENDING, CONFIRMED, IN_PROGRESS, COMPLETED, CANCELLED
+}
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @NotNull
+    @Min(-90)
+    @Max(90)
+    @Column(name = "pickup_lat", nullable = false)
+    private double pickupLat;
+
+    @NotNull
+    @Min(-180)
+    @Max(180)
+    @Column(name = "pickup_lon", nullable = false)
+    private double pickupLon;
+
+    @NotNull
+    @Min(-90)
+    @Max(90)
+    @Column(name = "dropoff_lat", nullable = false)
+    private double dropoffLat;
+
+    @CreationTimestamp
+@Column(updatable = false)
+private LocalDateTime createdAt;
+
+    @NotNull
+    @Min(-180)
+    @Max(180)
+    @Column(name = "dropoff_lon", nullable = false)
+    private double dropoffLon;
+
+    @Enumerated(EnumType.STRING)
+@Column(name = "status", nullable = false)
+private RideStatus status = RideStatus.PENDING;
+
+    @Column(name = "carbon_estimate")
+    private double carbonEstimate;
+
+    @NotBlank
+    @Column(name = "h3_index", nullable = false)
+    private String h3Index;
+
+    @NotNull
+    @Column(name = "user_id", nullable = false)
+    private Long userId;  // Link to User entity (add @ManyToOne if full relation)
+
+    @Column(name = "pickup_address")
+    private String pickupAddress;
+
+    @Column(name = "dropoff_address")
+    private String dropoffAddress;
+    @Column(name = "current_lat")
+    private Double currentLat = 0.0;
+
+    @Column(name = "current_lon")
+    private Double currentLon = 0.0;
+    // Getters and Setters
+    // In Ride entity (add if missing)
+
+
+public LocalDateTime getCreatedAt() { return createdAt; }
+public void setCreatedAt(LocalDateTime createdAt) { this.createdAt = createdAt; }
+    public Long getId() { return id; }
+    public void setId(Long id) { this.id = id; }
+    public double getPickupLat() { return pickupLat; }
+    public void setPickupLat(double pickupLat) { this.pickupLat = pickupLat; }
+    public double getPickupLon() { return pickupLon; }
+    public void setPickupLon(double pickupLon) { this.pickupLon = pickupLon; }
+    public double getDropoffLat() { return dropoffLat; }
+    public void setDropoffLat(double dropoffLat) { this.dropoffLat = dropoffLat; }
+    public double getDropoffLon() { return dropoffLon; }
+    public void setDropoffLon(double dropoffLon) { this.dropoffLon = dropoffLon; }
+    public RideStatus getStatus() { return status; }
+public void setStatus(RideStatus status) { this.status = status; }
+    public double getCarbonEstimate() { return carbonEstimate; }
+    public void setCarbonEstimate(double carbonEstimate) { this.carbonEstimate = carbonEstimate; }
+    public String getH3Index() { return h3Index; }
+    public void setH3Index(String h3Index) { this.h3Index = h3Index; }
+    public Long getUserId() { return userId; }
+    public void setUserId(Long userId) { this.userId = userId; }
+    public String getPickupAddress() { return pickupAddress; }
+    public void setPickupAddress(String pickupAddress) { this.pickupAddress = pickupAddress; }
+    public String getDropoffAddress() { return dropoffAddress; }
+    public void setDropoffAddress(String dropoffAddress) { this.dropoffAddress = dropoffAddress; }
+    // CHANGE: New getters/setters
+    public Double getCurrentLat() {
+        return currentLat;
+    }
+
+    public void setCurrentLat(Double currentLat) {
+        this.currentLat = currentLat;
+    }
+
+    public Double getCurrentLon() {
+        return currentLon;
+    }
+
+    public void setCurrentLon(Double currentLon) {
+        this.currentLon = currentLon;
+    }
+}
+
+--------------------------------------------------------------------------------
+
+----- FILE: entity\RideMatch.java -----
+
+// backend/src/main/java/com/example/entity/RideMatch.java
+package com.example.entity;
+
+import jakarta.persistence.*;
+
+import java.util.List;
+
+@Entity
+@Table(name = "ride_matches")
+public class RideMatch {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(name = "ride_id", nullable = false)
+    private Long rideId;
+
+    @ElementCollection
+    @CollectionTable(name = "matched_ride_ids", joinColumns = @JoinColumn(name = "ride_match_id"))
+    private List<Long> matchedRideIds;
+
+    @Column(name = "cluster_id")
+    private int clusterId;
+
+    // Getters and Setters
+    public Long getId() { return id; }
+    public void setId(Long id) { this.id = id; }
+    public Long getRideId() { return rideId; }
+    public void setRideId(Long rideId) { this.rideId = rideId; }
+    public List<Long> getMatchedRideIds() { return matchedRideIds; }
+    public void setMatchedRideIds(List<Long> matchedRideIds) { this.matchedRideIds = matchedRideIds; }
+    public int getClusterId() { return clusterId; }
+    public void setClusterId(int clusterId) { this.clusterId = clusterId; }
+}
+
+--------------------------------------------------------------------------------
+
+----- FILE: entity\RideMatchRequest.java -----
+
+// backend/src/main/java/com/example/entity/RideMatchRequest.java (New entity for match requests)
+package com.example.entity;
+
+import com.example.entity.Ride.RideStatus;
+
+import jakarta.persistence.*;
+
+@Entity
+@Table(name = "ride_match_requests")
+public class RideMatchRequest {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(name = "from_ride_id", nullable = false)
+    private Long fromRideId;
+
+    @Column(name = "to_ride_id", nullable = false)
+    private Long toRideId;
+
+    @Column(name = "status", nullable = false)
+    private RideStatus status; // PENDING, CONFIRMED, REJECTED
+    @Column(name = "start_confirmed_from", nullable = false)
+    private boolean startConfirmedFrom = false;
+
+    @Column(name = "start_confirmed_to", nullable = false)
+    private boolean startConfirmedTo = false;
+
+    @Column(name = "end_confirmed_from", nullable = false)
+    private boolean endConfirmedFrom = false;
+
+    @Column(name = "end_confirmed_to", nullable = false)
+    private boolean endConfirmedTo = false;
+
+    // Getters and Setters
+    public Long getId() { return id; }
+    public void setId(Long id) { this.id = id; }
+    public Long getFromRideId() { return fromRideId; }
+    public void setFromRideId(Long fromRideId) { this.fromRideId = fromRideId; }
+    public Long getToRideId() { return toRideId; }
+    public void setToRideId(Long toRideId) { this.toRideId = toRideId; }
+    public RideStatus getStatus() { return status; }
+    public void setStatus(Ride.RideStatus pending) { this.status = pending; }
+    public boolean isStartConfirmedFrom() { return startConfirmedFrom; }
+    public void setStartConfirmedFrom(boolean startConfirmedFrom) { this.startConfirmedFrom = startConfirmedFrom; }
+    public boolean isStartConfirmedTo() { return startConfirmedTo; }
+    public void setStartConfirmedTo(boolean startConfirmedTo) { this.startConfirmedTo = startConfirmedTo; }
+    public boolean isEndConfirmedFrom() { return endConfirmedFrom; }
+    public void setEndConfirmedFrom(boolean endConfirmedFrom) { this.endConfirmedFrom = endConfirmedFrom; }
+    public boolean isEndConfirmedTo() { return endConfirmedTo; }
+    public void setEndConfirmedTo(boolean endConfirmedTo) { this.endConfirmedTo = endConfirmedTo; }
+}
+
+--------------------------------------------------------------------------------
+
+----- FILE: entity\User.java -----
+
+package com.example.entity;
+
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.Id;
+
+@Entity
+public class User {
+  @Id
+  @GeneratedValue
+  private Long id;
+  private String username;
+  private String password;
+  private String profilePictureUrl;
+  private int trustScore = 100;  
+  @Column(name = "phone_number")
+    private String phoneNumber;
+
+    // CHANGE: Added for parent-child linking
+    @Column(name = "parent_id")
+    private Long parentId;
+    // in User.java
+@Column(name = "trust_alpha")
+private double trustAlpha = 49.5;  // example prior: N0=50, p0=0.99
+
+@Column(name = "trust_beta")
+private double trustBeta = 0.5;
+
+  // Getters and Setters
+  public double getTrustAlpha() {
+    return trustAlpha;
+  }
+  public double getTrustBeta() {
+    return trustBeta;
+  }
+  public void setTrustAlpha(double trustAlpha) {
+    this.trustAlpha = trustAlpha;
+  }
+  public void setTrustBeta(double trustBeta) {
+    this.trustBeta = trustBeta;
+  }
+  public Long getId() { return id; }
+  public void setId(Long id) { this.id = id; }
+  public String getUsername() { return username; }
+  public void setUsername(String username) { this.username = username; }
+  public String getPassword() { return password; }
+  public void setPassword(String password) { this.password = password; }
+  public String getProfilePictureUrl() { return profilePictureUrl; }
+  public void setProfilePictureUrl(String profilePictureUrl) { this.profilePictureUrl = profilePictureUrl; }
+  public int getTrustScore() { return trustScore; }
+  public void setTrustScore(int trustScore) { this.trustScore = trustScore; }
+  public String getPhoneNumber() { return phoneNumber; }
+public void setPhoneNumber(String phoneNumber) { this.phoneNumber = phoneNumber; }
+  public Long getParentId() { return parentId; }
+  public void setParentId(Long parentId) { this.parentId = parentId; }
+}
+
+--------------------------------------------------------------------------------
+
+==================== REPOSITORY ====================
+
+----- FILE: repository\FeedbackRepository.java -----
+
+package com.example.repository;
+
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.stereotype.Repository;
+
+import com.example.entity.Feedback;
+
+    @Repository
+    public interface FeedbackRepository extends JpaRepository<Feedback, Long> {
+
+        
+    }
+
+
+
+
+--------------------------------------------------------------------------------
+
+----- FILE: repository\ParentRepository.java -----
+
+// File: C:\Projects\EchoU\backend\src\main\java\com\example\repository\ParentRepository.java (new file)
+
+package com.example.repository;
+
+import com.example.entity.Parent;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.stereotype.Repository;
+
+@Repository
+public interface ParentRepository extends JpaRepository<Parent, Long> {
+    Parent findByUsername(String username);
+}
+
+--------------------------------------------------------------------------------
+
+----- FILE: repository\RideMatchRepository.java -----
+
+// backend/src/main/java/com/example/repository/RideMatchRepository.java
+package com.example.repository;
+
+import com.example.entity.RideMatch;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.stereotype.Repository;
+
+import java.util.List;
+
+@Repository
+public interface RideMatchRepository extends JpaRepository<RideMatch, Long> {
+    List<RideMatch> findByRideId(Long rideId);
+    void deleteByRideId(Long rideId);
+}
+
+--------------------------------------------------------------------------------
+
+----- FILE: repository\RideMatchRequestRepository.java -----
+
+// backend/src/main/java/com/example/repository/RideMatchRequestRepository.java (Fixed)
+package com.example.repository;
+
+import com.example.entity.Ride.RideStatus;
+import com.example.entity.RideMatchRequest;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
+import org.springframework.stereotype.Repository;
+
+import java.util.List;
+
+@Repository
+public interface RideMatchRequestRepository extends JpaRepository<RideMatchRequest, Long> {
+    
+    List<RideMatchRequest> findByToRideIdInAndStatus(List<Long> toRideIds, RideStatus pending);
+    List<RideMatchRequest> findByFromRideIdInAndStatus(List<Long> fromRideIds, RideStatus status);
+    RideMatchRequest findByFromRideIdAndToRideId(Long fromRideId, Long toRideId);
+    List<RideMatchRequest> findByStatusAndStartConfirmedFromAndStartConfirmedTo(RideStatus status, boolean from, boolean to);
+    List<RideMatchRequest> findByFromRideIdInAndStatusOrToRideIdInAndStatus(List<Long> rideIds, RideStatus status, List<Long> rideIds2, RideStatus status2);
+    void deleteByFromRideIdOrToRideId(Long fromRideId, Long toRideId);
+    
+}
+
+
+--------------------------------------------------------------------------------
+
+----- FILE: repository\RideRepository.java -----
+
+// backend/src/main/java/com/example/repository/RideRepository.java (Added findByH3IndexInAndStatus)
+package com.example.repository;
+
+import com.example.entity.Ride;
+import com.example.entity.Ride.RideStatus;
+
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
+import org.springframework.stereotype.Repository;
+
+import java.time.LocalDateTime;
+import java.util.List;
+
+@Repository
+public interface RideRepository extends JpaRepository<Ride, Long> {
+    List<Ride> findByStatus(Ride.RideStatus status);
+    List<Ride> findByUserId(Long userId);  // Added for user-specific rides
+    List<Ride> findByH3IndexAndStatus(String h3Index, Ride.RideStatus status);
+    List<Ride> findByH3IndexInAndStatusAndIdNot(List<String> h3Indices, Ride.RideStatus status, Long excludedId);
+    List<Ride> findByH3IndexInAndStatus(List<String> h3Indices, Ride.RideStatus pending);
+    List<Ride> findByUserIdAndStatus(Long userId, RideStatus status);
+    @Query("SELECT r FROM Ride r WHERE r.status = :status AND r.createdAt < :threshold")
+List<Ride> findByStatusAndCreatedAtBefore(@Param("status") RideStatus status, @Param("threshold") LocalDateTime threshold);
+}
+
+--------------------------------------------------------------------------------
+
+----- FILE: repository\UserRepository.java -----
+
+package com.example.repository;
+
+import com.example.entity.User;
+import org.springframework.data.jpa.repository.JpaRepository;
+
+public interface UserRepository extends JpaRepository<User, Long> {
+  User findByUsername(String username);
+}
+
+--------------------------------------------------------------------------------
+
+==================== SERVICE ====================
+
+----- FILE: service\FeedbackService.java -----
+
+// backendsrc/main/java/com/example/service/FeedbackService.java
+package com.example.service;
+
+import com.example.entity.Feedback;
+import com.example.entity.Ride;
+import com.example.entity.RideMatchRequest;
+import com.example.entity.User;
+import com.example.repository.FeedbackRepository;
+import com.example.repository.RideMatchRequestRepository;
+import com.example.repository.RideRepository;
+import com.example.repository.UserRepository;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.sql.Date;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
+
+import static com.example.entity.Ride.RideStatus.COMPLETED;
+
+@Service
+public class FeedbackService {
+
+    private static final Logger logger = LoggerFactory.getLogger(FeedbackService.class);
+
+    private final FeedbackRepository feedbackRepository;
+    private final UserRepository userRepository;
+    private final RideRepository rideRepository;
+    private final RideMatchRequestRepository rideMatchRequestRepository;
+    private final SentimentClient sentimentClient;
+    private final RedisTemplate<String, Object> redisTemplate;
+    private final KafkaTemplate<String, String> kafkaTemplate;
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
+    public FeedbackService(
+            FeedbackRepository feedbackRepository,
+            UserRepository userRepository,
+            RideRepository rideRepository,
+            RideMatchRequestRepository rideMatchRequestRepository,
+            SentimentClient sentimentClient,
+            RedisTemplate<String, Object> redisTemplate,
+            KafkaTemplate<String, String> kafkaTemplate
+    ) {
+        this.feedbackRepository = feedbackRepository;
+        this.userRepository = userRepository;
+        this.rideRepository = rideRepository;
+        this.rideMatchRequestRepository = rideMatchRequestRepository;
+        this.sentimentClient = sentimentClient;
+        this.redisTemplate = redisTemplate;
+        this.kafkaTemplate = kafkaTemplate;
+    }
+
+    /**
+     * fromUser gives feedback about partner for given ride.
+     * We infer partner from RideMatchRequest with COMPLETED status.
+     */
+    @Transactional
+public void submitFeedback(Long fromUserId, Long rideId, String comment) {
+    logger.info("=== FEEDBACK SUBMISSION START === fromUserId={}, rideId={}, comment length={}", 
+            fromUserId, rideId, comment != null ? comment.length() : 0);
+
+    try {
+        // 1. Verify from user exists
+        User fromUser = userRepository.findById(fromUserId)
+                .orElseThrow(() -> {
+                    logger.error("FAIL: From user not found. fromUserId={}", fromUserId);
+                    return new IllegalArgumentException("From user not found");
+                });
+        logger.info("Step 1 PASS: From user found. username={}", fromUser.getUsername());
+
+        // 2. Verify ride exists
+        Ride ride = rideRepository.findById(rideId)
+                .orElseThrow(() -> {
+                    logger.error("FAIL: Ride not found. rideId={}", rideId);
+                    return new IllegalArgumentException("Ride not found");
+                });
+        logger.info("Step 2 PASS: Ride found. userId={}, status={}", ride.getUserId(), ride.getStatus());
+
+        // 3. Verify ownership
+        if (!ride.getUserId().equals(fromUserId)) {
+            logger.error("FAIL: Ownership check failed. rideUserId={}, fromUserId={}", 
+                    ride.getUserId(), fromUserId);
+            throw new IllegalArgumentException("User does not own this ride");
+        }
+        logger.info("Step 3 PASS: Ownership verified");
+
+        // 4. Resolve partner
+        Long toUserId = resolvePartnerUserId(rideId);
+        if (toUserId == null) {
+            logger.warn("FAIL: No partner found (no COMPLETED match for rideId={}). Returning without storing feedback.", rideId);
+            return;  // Or throw if you want strict requirement
+        }
+        logger.info("Step 4 PASS: Partner resolved. toUserId={}", toUserId);
+
+        // 5. Get partner user
+        User toUser = userRepository.findById(toUserId)
+                .orElseThrow(() -> {
+                    logger.error("FAIL: Partner user not found. toUserId={}", toUserId);
+                    return new IllegalArgumentException("Partner user not found");
+                });
+        logger.info("Step 5 PASS: Partner user found. username={}", toUser.getUsername());
+
+        // 6. Calculate sentiment
+        double sentiment = sentimentClient.getSentimentScore(comment);
+        logger.info("Step 6 PASS: Sentiment calculated. sentiment={}", sentiment);
+
+        // 7. Update trust (Bayesian beta-binomial)
+        double alpha = toUser.getTrustAlpha();
+        double beta = toUser.getTrustBeta();
+        logger.info("Step 7a: Trust state before update. alpha={}, beta={}", alpha, beta);
+
+        double V = 1.0;  // weight per feedback
+        double rInc = V * (1.0 + sentiment) / 2.0;  // positive evidence
+        double sInc = V * (1.0 - sentiment) / 2.0;  // negative evidence
+
+        alpha += rInc;
+        beta += sInc;
+
+        if (alpha < 0.1) alpha = 0.1;
+        if (beta < 0.1) beta = 0.1;
+
+        toUser.setTrustAlpha(alpha);
+        toUser.setTrustBeta(beta);
+
+        // Calculate expected value (mode for display)
+        double p = (alpha - 1) / (alpha + beta - 2);
+        if (p < 0) p = 0;
+        if (p > 1) p = 1;
+
+        int oldScore = toUser.getTrustScore();
+        int rawScore = (int) Math.round(100.0 * p);
+        int maxDeltaPerFeedback = 5;
+        int bounded = oldScore + Math.max(-maxDeltaPerFeedback, 
+                Math.min(maxDeltaPerFeedback, rawScore - oldScore));
+        int finalScore = Math.max(0, Math.min(100, bounded));
+
+        toUser.setTrustScore(finalScore);
+        userRepository.save(toUser);
+
+        logger.info("Step 7b: Trust state UPDATED. oldScore={}, newScore={}, alpha={}, beta={}", 
+                oldScore, finalScore, alpha, beta);
+
+        // 8. Store feedback in DB
+        Feedback fb = new Feedback();
+        fb.setFromUserId(fromUserId);
+        fb.setToUserId(toUserId);
+        fb.setRideId(rideId);
+        fb.setComment(comment);
+        fb.setSentimentScore(sentiment);
+        fb.setWeight(V);
+        fb.setCreatedAt(new Date(System.currentTimeMillis()));
+
+        feedbackRepository.save(fb);
+        logger.info("Step 8 PASS: Feedback persisted. feedbackId={}", fb.getId());
+
+        // 9. Publish to Kafka
+        try {
+            String payload = objectMapper.writeValueAsString(
+                    Map.of(
+                            "type", "FEEDBACK",
+                            "fromUserId", fromUserId,
+                            "toUserId", toUserId,
+                            "rideId", rideId,
+                            "sentiment", sentiment,
+                            "newTrustScore", finalScore
+                    )
+            );
+            kafkaTemplate.send("user-events", payload);
+            logger.info("Step 9 PASS: Feedback event published to Kafka");
+        } catch (Exception e) {
+            logger.error("Step 9 WARN: Kafka publish failed (non-fatal)", e);
+        }
+
+        // 10. Cache and notify (optional)
+        try {
+            cacheAndPublishTrustScore(toUser.getUsername(), finalScore);
+            logger.info("Step 10 PASS: Trust score cached and published");
+        } catch (Exception e) {
+            logger.error("Step 10 WARN: Cache/publish failed (non-fatal)", e);
+        }
+
+        logger.info("=== FEEDBACK SUBMISSION SUCCESS ===");
+
+    } catch (Exception e) {
+        logger.error("=== FEEDBACK SUBMISSION FAILED ===", e);
+        throw e;
+    }
+}
+
+private Long resolvePartnerUserId(Long rideId) {
+    logger.info("resolvePartnerUserId START: rideId={}", rideId);
+    
+    List<Long> ids = List.of(rideId);
+    List<RideMatchRequest> reqs = rideMatchRequestRepository
+            .findByFromRideIdInAndStatusOrToRideIdInAndStatus(
+                    ids, Ride.RideStatus.COMPLETED,
+                    ids, Ride.RideStatus.COMPLETED
+            );
+
+    logger.info("resolvePartnerUserId: Found {} COMPLETED matches for rideId={}", reqs.size(), rideId);
+
+    if (reqs.isEmpty()) {
+        logger.warn("resolvePartnerUserId: No COMPLETED match found. Returns null");
+        return null;
+    }
+
+    RideMatchRequest req = reqs.get(0);
+    Long partnerRideId = rideId.equals(req.getFromRideId()) ? req.getToRideId() : req.getFromRideId();
+    logger.info("resolvePartnerUserId: partnerRideId={}", partnerRideId);
+
+    Ride partnerRide = rideRepository.findById(partnerRideId).orElse(null);
+    if (partnerRide == null) {
+        logger.error("resolvePartnerUserId: Partner ride not found. partnerRideId={}", partnerRideId);
+        return null;
+    }
+
+    Long partnerUserId = partnerRide.getUserId();
+    logger.info("resolvePartnerUserId: Partner found. partnerUserId={}", partnerUserId);
+    return partnerUserId;
+}
+
+
+    private void cacheAndPublishTrustScore(String username, int newScore) {
+        try {
+            redisTemplate.opsForValue().set(
+                    "user:" + username + ":trustScore",
+                    newScore,
+                    Duration.ofHours(1)
+            );
+        } catch (Exception e) {
+            logger.error("Failed to cache trust score for {}: {}", username, e.getMessage());
+        }
+
+        try {
+            String payload = objectMapper.writeValueAsString(
+                    Map.of(
+                            "type", "TRUSTSCOREUPDATE",
+                            "username", username,
+                            "trustScore", newScore
+                    )
+            );
+            kafkaTemplate.send("user-events", payload);
+        } catch (Exception e) {
+            logger.error("Failed to publish TRUSTSCOREUPDATE event: {}", e.getMessage());
+        }
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+----- FILE: service\KafkaConsumerService.java -----
+
+package com.example.service;
+
+import com.example.dto.ClusterResponse;
+import com.example.entity.Ride;
+import com.example.entity.RideMatch;
+import com.example.repository.RideMatchRepository;
+import com.example.repository.RideRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.kafka.annotation.KafkaListener;
+import org.springframework.kafka.support.KafkaHeaders;
+import org.springframework.messaging.handler.annotation.Header;
+import org.springframework.messaging.handler.annotation.Payload;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.client.RestTemplate;
+import com.example.entity.Ride.RideStatus;
+import java.util.*;
+import java.util.stream.Collectors;
+
+@Service
+public class KafkaConsumerService {
+
+    private static final Logger logger = LoggerFactory.getLogger(KafkaConsumerService.class);
+
+    private final RideMatchRepository rideMatchRepository;
+    private final RideRepository rideRepository;
+    private final RideService rideService;
+    private final RestTemplate restTemplate;
+
+    @Value("${cluster.url:http://person-detector:8000/cluster}")
+    private String clusterUrl;
+
+    public KafkaConsumerService(
+            RideMatchRepository rideMatchRepository,
+            RideRepository rideRepository,
+            RideService rideService,
+            RestTemplate restTemplate
+    ) {
+        this.rideMatchRepository = rideMatchRepository;
+        this.rideRepository = rideRepository;
+        this.rideService = rideService;
+        this.restTemplate = restTemplate;
+    }
+
+    @KafkaListener(topics = "ride-requests", groupId = "ride-matcher")
+    @Transactional
+    public void consumeRideRequest(
+            @Payload String h3Index,
+            @Header(KafkaHeaders.RECEIVED_KEY) String rideIdString
+    ) {
+        logger.info("Received Kafka Message. Key (RideID) = {}, Payload (H3) = {}", rideIdString, h3Index);
+
+        Long rideId;
+        try {
+            rideId = Long.parseLong(rideIdString);
+        } catch (NumberFormatException e) {
+            logger.error("Failed to parse Ride ID from Kafka key: {}", rideIdString);
+            return;
+        }
+
+        logger.info("Consuming ride request for ID {}", rideId);
+
+        try {
+            Ride ride = rideRepository.findById(rideId).orElse(null);
+            if (ride == null) {
+                logger.warn("Ride not found for ID {}", rideId);
+                return;
+            }
+
+            // 1) Fetch nearby rides (PENDING in same H3 ring)
+            List<Ride> nearbyRides = rideService.getNearbyRides(
+                    ride.getPickupLat(),
+                    ride.getPickupLon()
+            ); // uses findByH3IndexInAndStatus(..., "PENDING")
+            if (nearbyRides.isEmpty()) {
+                logger.info("No nearby rides found for clustering for Ride ID {}", rideId);
+                return;
+            }
+
+            logger.info("Found {} nearby rides for Ride ID {}", nearbyRides.size(), rideId);
+
+            // 2) Prepare riders payload for FastAPI
+            List<Map<String, Object>> riders = new ArrayList<>();
+            for (Ride r : nearbyRides) {
+                Map<String, Object> rider = new HashMap<>();
+                rider.put("lat", r.getPickupLat());
+                rider.put("lon", r.getPickupLon());
+                // Still send trust score for compatibility; FastAPI ignores it in clustering
+                rider.put("trust_score", rideService.getUserTrustScore(r.getUserId()));
+                rider.put("ride_id", r.getId());
+                riders.add(rider);
+            }
+
+            Map<String, Object> clusterRequest = Map.of("riders", riders);
+
+            // 3) Call FastAPI /cluster
+            ClusterResponse[] clusters = restTemplate.postForObject(
+                    clusterUrl,
+                    clusterRequest,
+                    ClusterResponse[].class
+            );
+
+            logger.info("Clusters received: {}", Arrays.toString(clusters));
+
+            if (clusters == null || clusters.length == 0) {
+                logger.info("No clusters returned from FastAPI for Ride ID {}", rideId);
+                return;
+            }
+
+            // 4) Group rides by cluster ID
+            Map<Integer, List<Long>> clusterMap = new HashMap<>();
+            for (ClusterResponse c : clusters) {
+                int clusterId = c.getCluster();
+                Long rId = c.getRide_id();
+                clusterMap
+                        .computeIfAbsent(clusterId, k -> new ArrayList<>())
+                        .add(rId);
+            }
+logger.info("Clustering request for h3Index={}, rideId={}", h3Index, rideIdString);
+logger.info("Clusters response: {}", Arrays.toString(clusters));
+
+            // 5) For EACH ride in each cluster, create/update RideMatch
+            for (Map.Entry<Integer, List<Long>> entry : clusterMap.entrySet()) {
+                int clusterId = entry.getKey();
+                List<Long> rideIdsInCluster = entry.getValue()
+                        .stream()
+                        .distinct()
+                        .collect(Collectors.toList());
+
+                for (Long rId : rideIdsInCluster) {
+                    // All other rides in same cluster except self
+                    List<Long> matchedIds = rideIdsInCluster.stream()
+                            .filter(otherId -> !otherId.equals(rId))
+                            .collect(Collectors.toList());
+
+                    // Remove old matches for this ride to avoid duplicates/stale data
+                    rideMatchRepository.deleteByRideId(rId);
+
+                    if (!matchedIds.isEmpty()) {
+                        RideMatch match = new RideMatch();
+                        match.setRideId(rId);
+                        match.setMatchedRideIds(matchedIds);
+                        match.setClusterId(clusterId);
+                        rideMatchRepository.save(match);
+
+                        logger.info(
+                                "Saved cluster {} for ride {} with matches {}",
+                                clusterId, rId, matchedIds
+                        );
+                    } else {
+                        logger.info(
+                                "Cluster {} for ride {} has no other rides, skipping",
+                                clusterId, rId
+                        );
+                    }
+                }
+            }
+            
+
+        } catch (Exception e) {
+            logger.error("Clustering failed for ride {}: {}", rideId, e.getMessage(), e);
+        }
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+----- FILE: service\MinioService.java -----
+
+package com.example.service;
+
+import io.minio.SetBucketPolicyArgs;
+import io.minio.BucketExistsArgs;
+import io.minio.GetObjectArgs;
+import io.minio.MakeBucketArgs;
+import io.minio.MinioClient;
+import io.minio.PutObjectArgs;
+import jakarta.annotation.PostConstruct;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+
+import java.io.ByteArrayInputStream;
+
+@Service
+public class MinioService {
+
+    private final MinioClient minioClient;
+    private static final org.slf4j.Logger logger =
+        org.slf4j.LoggerFactory.getLogger(MinioService.class);
+    @Value("${minio.bucket:profiles}")
+    private String bucket;  // Fixed: 'bucket', not 'buckets'
+
+    @Value("${minio.url}")  // Internal: http://minio:9000 in Docker
+    private String minioEndpoint;
+
+    @Value("${minio.public-host:http://localhost:9000}")  // New: Env for browser-facing URL
+    private String publicHost;
+
+    public MinioService(@Value("${minio.url}") String url,
+                        @Value("${minio.access-key}") String accessKey,
+                        @Value("${minio.secret-key}") String secretKey) {
+        this.minioClient = MinioClient.builder()
+                .endpoint(url)
+                .credentials(accessKey, secretKey)
+                .build();
+    }
+
+    @PostConstruct
+    public void init() {
+        try {
+            boolean found = minioClient.bucketExists(BucketExistsArgs.builder().bucket(bucket).build());
+            if (!found) {
+                minioClient.makeBucket(MakeBucketArgs.builder().bucket(bucket).build());
+            }
+            setPublicReadPolicy();
+        } catch (Exception e) {
+            throw new RuntimeException("Error initializing MinIO bucket", e);
+        }
+    }
+
+    private void setPublicReadPolicy() {
+        try {
+            String policy = """
+                    {
+                      "Version": "2012-10-17",
+                      "Statement": [
+                        {
+                          "Effect": "Allow",
+                          "Principal": "*",
+                          "Action": ["s3:GetObject"],
+                          "Resource": ["arn:aws:s3:::%s/*"]
+                        }
+                      ]
+                    }
+                    """.formatted(bucket);
+
+            minioClient.setBucketPolicy(
+                    SetBucketPolicyArgs.builder()
+                                       .bucket(bucket)
+                                       .config(policy)
+                                       .build());
+            logger.info("✅ Bucket {} is now public-read", bucket);
+        } catch (Exception e) {
+            logger.warn("Could not set public-read policy (maybe already set): {}", e.getMessage());
+        }
+    }
+
+    public String uploadImage(String fileName, byte[] imageBytes) throws Exception {
+        minioClient.putObject(
+                PutObjectArgs.builder()
+                        .bucket(bucket)
+                        .object(fileName)
+                        .stream(new ByteArrayInputStream(imageBytes), imageBytes.length, -1)
+                        .contentType("image/jpeg")
+                        .build());
+        return fileName;
+    }
+
+    public byte[] getObject(String bucketName, String objectName) throws Exception {
+        try (var in = minioClient.getObject(
+                GetObjectArgs.builder().bucket(bucketName).object(objectName).build())) {
+            return in.readAllBytes();
+        }
+    }
+
+    public String getPublicUrl(String objectName) {
+        return publicHost.endsWith("/")
+                ? publicHost + bucket + "/" + objectName
+                : publicHost + "/" + bucket + "/" + objectName;
+    }
+}
+
+--------------------------------------------------------------------------------
+
+----- FILE: service\RideService.java -----
+
+package com.example.service;
+import com.example.entity.Ride.RideStatus;
+
+import jakarta.annotation.PostConstruct;
+import com.example.dto.RideRequest;
+import com.example.entity.Ride;
+import com.example.entity.Ride.RideStatus;
+import com.example.entity.User;
+import com.example.repository.RideMatchRepository;
+import com.example.repository.RideMatchRequestRepository;
+import com.example.repository.RideRepository;
+import com.example.repository.UserRepository;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.uber.h3core.H3Core;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.ResponseEntity;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.core.ParameterizedTypeReference;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.client.RestTemplate;
+
+import java.io.IOException;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.time.LocalDateTime;
+import java.util.*;
+import java.util.stream.Collectors;
+
+@Service
+public class RideService {
+    private static final Logger logger = LoggerFactory.getLogger(RideService.class);
+    final RideRepository rideRepository;
+    private final UserRepository userRepository;
+    private final KafkaTemplate<String, String> kafkaTemplate;
+    private final H3Core h3;
+    @Autowired
+private RideMatchRepository rideMatchRepository;
+
+@Autowired
+private RideMatchRequestRepository rideMatchRequestRepository;
+    private static final double EARTH_RADIUS = 6371; // km
+    private static final double EMISSION_FACTOR = 0.2; // kg CO2/km
+    
+    private final RestTemplate restTemplate;
+    private final RedisTemplate<String, Object> redisTemplate;
+
+    public RideService(RideRepository rideRepository, UserRepository userRepository, KafkaTemplate<String, String> kafkaTemplate, RestTemplate restTemplate, RedisTemplate<String, Object> redisTemplate) throws IOException {
+        this.rideRepository = rideRepository;
+        this.userRepository = userRepository;
+        this.kafkaTemplate = kafkaTemplate;
+        this.restTemplate = restTemplate;
+        this.redisTemplate = redisTemplate;
+        try {
+            this.h3 = H3Core.newInstance();
+            logger.info("Successfully initialized H3Core");
+        } catch (IOException e) {
+            logger.error("Failed to initialize H3Core: {}", e.getMessage());
+            throw e;
+        }
+    }
+
+    @Transactional
+    public Ride createRide(RideRequest request) {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        if (auth == null || !auth.isAuthenticated()) {
+            throw new IllegalStateException("No authenticated user found");
+        }
+        String username = auth.getName();
+        User user = userRepository.findByUsername(username);
+        if (user == null) {
+            throw new IllegalStateException("Authenticated user not found");
+        }
+
+        if (!isValidLat(request.getPickupLat()) || !isValidLon(request.getPickupLon()) ||
+            !isValidLat(request.getDropoffLat()) || !isValidLon(request.getDropoffLon())) {
+            throw new IllegalArgumentException("Invalid coordinates");
+        }
+
+        double distance = calculateDistance(
+            request.getPickupLat(), request.getPickupLon(),
+            request.getDropoffLat(), request.getDropoffLon()
+        );
+
+        Map<String, String> pickupAddr = reverseGeocode(request.getPickupLat(), request.getPickupLon());
+        Map<String, String> dropoffAddr = reverseGeocode(request.getDropoffLat(), request.getDropoffLon());
+
+        Ride ride = new Ride();
+        ride.setPickupLat(request.getPickupLat());
+        ride.setPickupLon(request.getPickupLon());
+        ride.setDropoffLat(request.getDropoffLat());
+        ride.setDropoffLon(request.getDropoffLon());
+        ride.setPickupAddress(pickupAddr.getOrDefault("display_name", "Unknown"));
+        ride.setDropoffAddress(dropoffAddr.getOrDefault("display_name", "Unknown"));
+        ride.setUserId(user.getId());
+        long h3IndexLong = h3.latLngToCell(request.getPickupLat(), request.getPickupLon(), 8);
+        String h3Index = h3.h3ToString(h3IndexLong);
+        ride.setH3Index(h3Index);
+        ride.setCarbonEstimate((distance * EMISSION_FACTOR)/2);
+
+        Ride savedRide = rideRepository.save(ride);
+        logger.info("Ride created: ID={}, User={}, H3={}", savedRide.getId(), user.getId(), h3Index);
+
+        try {
+            kafkaTemplate.send("ride-requests", savedRide.getId().toString(), h3Index);
+            logger.info("Kafka message sent for rideId: {}, h3: {}", savedRide.getId(), h3Index);
+        } catch (Exception e) {
+            logger.error("Failed to publish Kafka event for ride {}: {}", savedRide.getId(), e.getMessage());
+        }
+
+        return savedRide;
+    }
+
+    public List<Ride> getNearbyRides(double pickupLat, double pickupLon) {
+        long centerLong = h3.latLngToCell(pickupLat, pickupLon, 8);
+        String center = h3.h3ToString(centerLong);
+        List<String> ring = h3.gridDisk(center, 2); // ~5km
+        return rideRepository.findByH3IndexInAndStatus(ring, RideStatus.PENDING);
+    }
+
+    public Integer getUserTrustScore(Long userId) {
+        User user = userRepository.findById(userId).orElseThrow(() -> new IllegalArgumentException("User not found: " + userId));
+        return user.getTrustScore();
+    }
+    
+    @Scheduled(cron = "0 0 * * * *") // Every hour
+    @Transactional
+public void cleanupOldRides() {
+    LocalDateTime threshold = LocalDateTime.now().minusDays(1);
+    
+    // Delete pending rides older than 1 day
+    List<Ride> oldPending = rideRepository.findByStatusAndCreatedAtBefore(
+        Ride.RideStatus.PENDING, threshold);
+    oldPending.forEach(ride -> {
+        // Remove from clusters if any
+        rideMatchRepository.deleteByRideId(ride.getId());
+        rideRepository.delete(ride);
+    });
+
+    // Delete completed rides older than 1 day
+    List<Ride> oldCompleted = rideRepository.findByStatusAndCreatedAtBefore(
+        Ride.RideStatus.COMPLETED, threshold);
+    oldCompleted.forEach(ride -> {
+        rideRepository.delete(ride);
+        // Optionally also clean related match requests
+        rideMatchRequestRepository.deleteByFromRideIdOrToRideId(ride.getId(), ride.getId());
+    });
+}
+// In RideService.java (or a new ScheduledTasks class)
+
+
+
+
+private double calculateDistance(double lat1, double lon1, double lat2, double lon2) {
+    // CHANGE: Use OSRM API for road distance instead of Haversine
+    try {
+        String url = "http://router.project-osrm.org/route/v1/driving/" + lon1 + "," + lat1 + ";" + lon2 + "," + lat2 + "?overview=false";
+        String response = restTemplate.getForObject(url, String.class);
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode root = mapper.readTree(response);
+        if (root.has("routes") && !root.get("routes").isEmpty()) {
+            return root.get("routes").get(0).get("distance").asDouble() / 1000.0; // km
+        }
+    } catch (Exception e) {
+        logger.warn("OSRM API failed, fallback to Haversine: {}", e.getMessage());
+    }
+    // Fallback to Haversine
+    double dLat = Math.toRadians(lat2 - lat1);
+    double dLon = Math.toRadians(lon2 - lon1);
+    double a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+               Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
+               Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return EARTH_RADIUS * c;
+}
+
+    private boolean isValidLat(double lat) {
+        return lat >= -90 && lat <= 90;
+    }
+
+    private boolean isValidLon(double lon) {
+        return lon >= -180 && lon <= 180;
+    }
+
+    public Map<String, Double> geocode(String address) {
+        String cacheKey = "geocode:" + address.toLowerCase().replace(" ", "_");
+        @SuppressWarnings("unchecked")
+        Map<String, Double> cached = (Map<String, Double>) redisTemplate.opsForValue().get(cacheKey);
+        if (cached != null) {
+            logger.info("Geocode cache hit for: {}", address);
+            return cached;
+        }
+
+        try {
+            String url = "https://nominatim.openstreetmap.org/search?q=" + URLEncoder.encode(address, StandardCharsets.UTF_8) + "&format=json&limit=1";
+            ResponseEntity<List<Map<String, String>>> response = restTemplate.exchange(url, HttpMethod.GET, null, new ParameterizedTypeReference<List<Map<String, String>>>() {});
+            if (response.getBody() != null && !response.getBody().isEmpty()) {
+                Map<String, String> result = response.getBody().get(0);
+                Map<String, Double> location = Map.of(
+                    "lat", Double.parseDouble(result.get("lat")),
+                    "lon", Double.parseDouble(result.get("lon"))
+                );
+                redisTemplate.opsForValue().set(cacheKey, location, Duration.ofDays(7));
+                logger.info("Geocoded address: {} -> {}", address, location);
+                return location;
+            }
+            logger.warn("No geocode results for: {}", address);
+            return null;
+        } catch (Exception e) {
+            logger.error("Geocoding failed for {}: {}", address, e.getMessage());
+            return null;
+        }
+    }
+
+    public Map<String, String> reverseGeocode(double lat, double lon) {
+        String cacheKey = String.format("reverse-geocode:%.6f,%.6f", lat, lon);
+        @SuppressWarnings("unchecked")
+        Map<String, String> cached = (Map<String, String>) redisTemplate.opsForValue().get(cacheKey);
+        if (cached != null) {
+            logger.info("Reverse geocode cache hit for: {},{}", lat, lon);
+            return cached;
+        }
+
+        try {
+            String url = String.format("https://nominatim.openstreetmap.org/reverse?lat=%.6f&lon=%.6f&format=json", lat, lon);
+            ResponseEntity<Map<String, Object>> response = restTemplate.exchange(url, HttpMethod.GET, null, new ParameterizedTypeReference<Map<String, Object>>() {});
+            if (response.getBody() != null) {
+                Map<String, Object> result = response.getBody();
+                String displayName = result.containsKey("display_name") ? (String) result.get("display_name") : "";
+                Map<String, String> location = new HashMap<>();
+                location.put("display_name", displayName);
+                redisTemplate.opsForValue().set(cacheKey, location, Duration.ofDays(7));
+                logger.info("Reverse geocoded: {},{} -> {}", lat, lon, displayName);
+                return location;
+            }
+            logger.warn("No reverse geocode results for: {},{}", lat, lon);
+            return Map.of("display_name", "Unknown");
+        } catch (Exception e) {
+            logger.error("Reverse geocoding failed for {},{}: {}", lat, lon, e.getMessage());
+            return Map.of("display_name", "Unknown");
+        }
+    }
+}
+
+--------------------------------------------------------------------------------
+
+----- FILE: service\SentimentClient.java -----
+
+// backendsrc/main/java/com/example/service/SentimentClient.java
+package com.example.service;
+
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestTemplate;
+
+import java.util.Map;
+
+@Service
+public class SentimentClient {
+
+    private final RestTemplate restTemplate;
+
+    @Value("${sentiment.url:http://localhost:8000/sentiment}")
+    private String sentimentUrl;
+
+    public SentimentClient(RestTemplate restTemplate) {
+        this.restTemplate = restTemplate;
+    }
+
+    /**
+     * Returns sentiment in [-1, 1]
+     */
+    public double getSentimentScore(String text) {
+        Map<String, String> req = Map.of("text", text);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> resp = restTemplate.postForObject(sentimentUrl, req, Map.class);
+        if (resp == null || !resp.containsKey("score")) {
+            throw new IllegalStateException("Sentiment service failed");
+        }
+        Object scoreObj = resp.get("score");
+        if (!(scoreObj instanceof Number)) {
+            throw new IllegalStateException("Invalid sentiment score type: " + scoreObj);
+        }
+        double s = ((Number) scoreObj).doubleValue();
+        if (s < -1.0) s = -1.0;
+        if (s > 1.0) s = 1.0;
+        return s;
+    }
+}
+
+
+--------------------------------------------------------------------------------
+
+----- FILE: service\UserService.java -----
+
+package com.example.service;
+
+import com.example.config.JwtTokenProvider;
+import com.example.dto.SignupRequest;
+import com.example.entity.User;
+import com.example.repository.UserRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.io.ByteArrayResource;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
+import org.springframework.web.client.RestClientException;
+import org.springframework.web.client.RestTemplate;
+import org.springframework.web.multipart.MultipartFile;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import java.time.Duration;
+import java.util.Map;
+
+@Service
+public class UserService {
+
+    private static final Logger logger = LoggerFactory.getLogger(UserService.class);
+    private final UserRepository userRepository;
+    private final PasswordEncoder passwordEncoder;
+    private final JwtTokenProvider jwtTokenProvider;
+    private final MinioService minioService;
+    private final RestTemplate restTemplate;
+    private final RedisTemplate<String, Object> redisTemplate;
+    private final KafkaTemplate<String, String> kafkaTemplate;
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
+    @Value("${person.detector.url:http://localhost:8000/detect_person}")
+    private String personDetectorUrl;
+
+    public UserService(UserRepository userRepository,
+                       PasswordEncoder passwordEncoder,
+                       JwtTokenProvider jwtTokenProvider,
+                       MinioService minioService,
+                       RestTemplate restTemplate,
+                       RedisTemplate<String, Object> redisTemplate,
+                       KafkaTemplate<String, String> kafkaTemplate) {
+        this.userRepository = userRepository;
+        this.passwordEncoder = passwordEncoder;
+        this.jwtTokenProvider = jwtTokenProvider;
+        this.minioService = minioService;
+        this.restTemplate = restTemplate;
+        this.redisTemplate = redisTemplate;
+        this.kafkaTemplate = kafkaTemplate;
+    }
+
+    private static class UserEvent {
+        private String type;
+        private String username;
+        private Integer trustScore;
+
+        public UserEvent(String type, String username, Integer trustScore) {
+            this.type = type;
+            this.username = username;
+            this.trustScore = trustScore;
+        }
+
+        public String getType() { return type; }
+        public void setType(String type) { this.type = type; }
+        public String getUsername() { return username; }
+        public void setUsername(String username) { this.username = username; }
+        public Integer getTrustScore() { return trustScore; }
+        public void setTrustScore(Integer trustScore) { this.trustScore = trustScore; }
+    }
+
+    @Transactional
+    public boolean signup(SignupRequest request) {
+        try {
+            if (userRepository.findByUsername(request.getUsername()) != null) {
+                logger.info("Signup attempted but username already exists: {}", request.getUsername());
+                return false;
+            }
+
+            byte[] imageBytes = request.getProfilePicture().getBytes();
+
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.MULTIPART_FORM_DATA);
+            MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
+            body.add("file", new ByteArrayResource(imageBytes) {
+                @Override public String getFilename() { return "profile.jpg"; }
+            });
+            HttpEntity<MultiValueMap<String, Object>> entity = new HttpEntity<>(body, headers);
+
+            Map<String, Boolean> response;
+            try {
+                response = restTemplate.postForObject(personDetectorUrl, entity, Map.class);
+            } catch (RestClientException rce) {
+                logger.warn("Person detector unavailable, allowing signup: {}", rce.getMessage());
+                response = Map.of("has_person", true);
+            }
+
+            if (response == null || !response.getOrDefault("has_person", false)) {
+                logger.info("No person detected for user: {}", request.getUsername());
+                return false;
+            }
+
+            String fileName = System.currentTimeMillis() + "_" + request.getUsername() + ".jpg";
+            String objectName = minioService.uploadImage(fileName, imageBytes);
+
+            User user = new User();
+            user.setUsername(request.getUsername());
+            user.setPassword(passwordEncoder.encode(request.getPassword()));
+            user.setProfilePictureUrl(objectName);
+            user.setTrustScore(100);
+            user.setPhoneNumber(request.getPhoneNumber());
+            userRepository.save(user);
+
+            redisTemplate.opsForValue().set("user:" + user.getUsername() + ":trustScore", 100, Duration.ofHours(1));
+            try {
+                kafkaTemplate.send("user-events", objectMapper.writeValueAsString(new UserEvent("SIGNUP", user.getUsername(), null)));
+                logger.info("Published SIGNUP event for {}", user.getUsername());
+            } catch (Exception e) {
+                logger.error("Failed to publish SIGNUP event: {}", e.getMessage());
+            }
+
+            logger.info("User registered: {}", request.getUsername());
+            return true;
+        } catch (Exception e) {
+            logger.error("Signup failed for user {}: {}", request.getUsername(), e.getMessage(), e);
+            return false;
+        }
+    }
+
+    public String signupAndReturnObjectName(String username, String password, MultipartFile file,String phoneNumber) {
+        SignupRequest req = new SignupRequest(username, password, file,phoneNumber);
+        boolean ok = signup(req);
+        if (!ok) return null;
+        User u = userRepository.findByUsername(username);
+        return u != null ? u.getProfilePictureUrl() : null;
+    }
+
+    public String login(String username, String password) {
+        User user = userRepository.findByUsername(username);
+        if (user != null && passwordEncoder.matches(password, user.getPassword())) {
+            return jwtTokenProvider.generateToken(username, user.getTrustScore());
+        }
+        return null;
+    }
+
+    @Transactional
+    public void updateTrustScore(Long userId, int delta) {
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new IllegalArgumentException("User not found: " + userId));
+        int newScore = Math.max(0, Math.min(100, user.getTrustScore() + delta));
+        user.setTrustScore(newScore);
+        userRepository.save(user);
+        try {
+            redisTemplate.opsForValue().set("user:" + user.getUsername() + ":trustScore", newScore, Duration.ofHours(1));
+            logger.info("Cached trust score for {}: {}", user.getUsername(), newScore);
+        } catch (Exception e) {
+            logger.error("Failed to cache trust score for {}: {}", user.getUsername(), e.getMessage());
+        }
+        try {
+            kafkaTemplate.send("user-events", objectMapper.writeValueAsString(new UserEvent("TRUST_SCORE_UPDATE", user.getUsername(), newScore)));
+            logger.info("Published TRUST_SCORE_UPDATE event for {}: {}", user.getUsername(), newScore);
+        } catch (Exception e) {
+            logger.error("Failed to publish TRUST_SCORE_UPDATE event: {}", e.getMessage());
+        }
+        logger.info("Trust score updated for {} (id={}) -> {}", user.getUsername(), userId, newScore);
+    }
+
+    public int getTrustScore(String username) {
+        Object cachedScore = redisTemplate.opsForValue().get("user:" + username + ":trustScore");
+        if (cachedScore instanceof Integer) return (Integer) cachedScore;
+        User user = userRepository.findByUsername(username);
+        if (user == null) throw new IllegalArgumentException("User not found");
+        redisTemplate.opsForValue().set("user:" + username + ":trustScore", user.getTrustScore(), Duration.ofHours(1));
+        logger.info("Cached trust score for {}: {}", username, user.getTrustScore());
+        return user.getTrustScore();
+    }
+}
+
+--------------------------------------------------------------------------------
+
+
+TOTAL JAVA FILES COLLECTED: 40
+END OF FILE

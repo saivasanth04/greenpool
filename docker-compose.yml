@@ -1,0 +1,183 @@
+services:
+  
+  mysql:
+    image: mysql:8.0.32
+    environment:
+      MYSQL_ROOT_PASSWORD: password
+      MYSQL_DATABASE: mydb
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    command: --default-authentication-plugin=mysql_native_password
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-ppassword"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    mem_limit: 300m  
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    mem_limit: 200m  
+
+  backend:
+    build: 
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      minio:
+        condition: service_started
+      person-detector:
+        condition: service_healthy
+      redis:
+        condition: service_healthy 
+      kafka:
+        condition: service_healthy  
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/mydb?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: password
+      MINIO_URL: http://minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: profiles
+      MINIO_PUBLIC_HOST: http://localhost:9000
+      PERSON_DETECTOR_URL: http://person-detector:8000/detect_person
+      JWT_SECRET: u/PjdcwVzCGmlHX7b5VnF4MFhG601Am/TIBMgtFWql8=
+      SPRING_REDIS_HOST: redis
+      SPRING_REDIS_PORT: 6379
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    
+    # DEBUG LOGGING - Shows exact SQL + parameter binding errors
+      JAVA_OPTS: |
+        -Dlogging.level.org.hibernate.SQL=DEBUG
+        -Dlogging.level.org.hibernate.type.descriptor.sql.BasicBinder=TRACE  
+        -Dlogging.level.org.springframework.data.jpa=DEBUG
+        -Dspring.jpa.show-sql=true
+        -Dspring.jpa.properties.hibernate.format_sql=true
+        -Dlogging.level.com.example.repository.RideMatchRequestRepository=DEBUG
+      
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    mem_limit: 1g
+
+
+  person-detector:
+    build: 
+      context: ./person-detector
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s 
+    mem_limit: 500m
+    volumes:
+      - ./person-detector:/app 
+
+  redis:
+    image: redis:latest
+    ports:
+      - "6379:6379"
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    mem_limit: 256m
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    hostname: kafka
+    container_name: kafka
+    ports:
+      - "9092:9092"
+      - "9101:9101"
+    environment:
+      CLUSTER_ID: "DMR2QPT9TExAkHUt8swm5w"  # Base64-encoded UUID
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_DIRS: "/var/lib/kafka/data"
+      KAFKA_BROKER_RACK: "rack1"
+      KAFKA_MIN_INSYNC_REPLICAS: 1
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    mem_limit: 512m
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    mem_limit: 200m 
+
+  # Day 12: Spark Service (local[*] mode for ML batch jobs)
+  # spark:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile.spark  # Custom Dockerfile below
+  #   ports:
+  #     - "8081:4040"  # Spark UI (local mode uses 4040)
+  #   volumes:
+  #     - ./spark-jobs:/opt/spark/work-dir  # Mount scripts/data
+  #     - spark-data:/data  # Persistent Parquet output
+  #   depends_on:
+  #     mysql:
+  #       condition: service_healthy
+  #   environment:
+  #     - SPARK_MASTER=local[*]
+  #   command: tail -f /dev/null  # Keep alive; submit jobs via docker exec
+  #   mem_limit: 8g
+  #   cpus: 4  # Limits to 4 CPU cores (legacy key, works locally) 
+  #   user: root
+volumes:
+  mysql-data:
+  minio-data:
+  # spark-data:  
+  kafka-data:  # Added for persistence

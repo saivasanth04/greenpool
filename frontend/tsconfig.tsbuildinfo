@@ -1,0 +1,1 @@
+{"root":["./src/activeride.tsx","./src/app.tsx","./src/capturemodal.tsx","./src/feedbackpage.tsx","./src/home.tsx","./src/login.tsx","./src/parenthome.tsx","./src/parentlogin.tsx","./src/parentsignup.tsx","./src/ridematches.tsx","./src/riderequest.tsx","./src/signup.tsx","./src/welcome.tsx","./src/api.ts","./src/main.tsx","./src/types/css.d.ts"],"version":"5.9.3"}
