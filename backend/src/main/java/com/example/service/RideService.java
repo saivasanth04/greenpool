@@ -48,9 +48,16 @@ private RideMatchRepository rideMatchRepository;
 
 @Autowired
 private RideMatchRequestRepository rideMatchRequestRepository;
+    private static final String GEOAPIFY_API_KEY = "c7be5432e67d49ba9055bffad38ed9eb";
     private static final double EARTH_RADIUS = 6371; // km
     private static final double EMISSION_FACTOR = 0.2; // kg CO2/km
-    
+    // How many points to sample per route for clustering
+private static final int ROUTE_SAMPLES = 20; // you can tune (20–40 is fine)
+
+// Tolerances in km for final pickup/dropoff checks
+private static final double MAX_PICKUP_DIST_KM = 2.0;  // 2 km
+private static final double MAX_DROPOFF_DIST_KM = 2.0; // 2 km
+
     private final RestTemplate restTemplate;
     private final RedisTemplate<String, Object> redisTemplate;
 
@@ -126,6 +133,159 @@ private RideMatchRequestRepository rideMatchRequestRepository;
         List<String> ring = h3.gridDisk(center, 2); // ~5km
         return rideRepository.findByH3IndexInAndStatus(ring, RideStatus.PENDING);
     }
+/**
+ * Fetch full OSRM route geometry as list of [lat, lon] points.
+ */
+private List<double[]> fetchRoutePoints(double pickupLat,
+                                        double pickupLon,
+                                        double dropoffLat,
+                                        double dropoffLon) {
+    try {
+        // OSRM expects lon,lat;lon,lat
+        String coords = String.format(
+                Locale.US,
+                "%f,%f;%f,%f",
+                pickupLon, pickupLat,
+                dropoffLon, dropoffLat
+        );
+
+        String url = "http://router.project-osrm.org/route/v1/driving/" + coords
+                + "?overview=full&geometries=geojson&steps=false&alternatives=false";
+
+        String response = restTemplate.getForObject(url, String.class);
+        if (response == null) {
+            logger.warn("OSRM route response null for coords={}", coords);
+            return List.of();
+        }
+
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode root = mapper.readTree(response);
+        JsonNode routes = root.get("routes");
+        if (routes == null || !routes.isArray() || routes.isEmpty()) {
+            logger.warn("No routes in OSRM response for coords={}", coords);
+            return List.of();
+        }
+
+        JsonNode geometry = routes.get(0).get("geometry");
+        if (geometry == null || geometry.isNull()) {
+            logger.warn("No geometry in OSRM route for coords={}", coords);
+            return List.of();
+        }
+
+        JsonNode coordsNode = geometry.get("coordinates");
+        if (coordsNode == null || !coordsNode.isArray() || coordsNode.isEmpty()) {
+            logger.warn("No coordinates in OSRM geometry for coords={}", coords);
+            return List.of();
+        }
+
+        List<double[]> points = new ArrayList<>();
+        for (JsonNode c : coordsNode) {
+            if (c.size() < 2) continue;
+            double lon = c.get(0).asDouble();
+            double lat = c.get(1).asDouble();
+            points.add(new double[]{lat, lon}); // store as [lat, lon]
+        }
+        logger.info("Fetched {} route points from OSRM for coords={}", points.size(), coords);
+        return points;
+    } catch (Exception e) {
+        logger.warn("OSRM route fetch failed: {}", e.getMessage());
+        return List.of();
+    }
+}
+
+/**
+ * Resample a polyline (list of [lat,lon]) to exactly n points by index interpolation.
+ * This is simple and works well enough for your use case.
+ */
+private List<double[]> resampleRoute(List<double[]> points, int n) {
+    List<double[]> result = new ArrayList<>(n);
+
+    if (points == null || points.isEmpty()) {
+        return result;
+    }
+    if (points.size() == 1) {
+        double[] p = points.get(0);
+        for (int i = 0; i < n; i++) {
+            result.add(new double[]{p[0], p[1]});
+        }
+        return result;
+    }
+
+    int lastIdx = points.size() - 1;
+    for (int i = 0; i < n; i++) {
+        double t = i * (double) lastIdx / Math.max(1, n - 1);
+        int j0 = (int) Math.floor(t);
+        int j1 = (int) Math.ceil(t);
+        if (j0 == j1) {
+            double[] p = points.get(j0);
+            result.add(new double[]{p[0], p[1]});
+        } else {
+            double w = t - j0;
+            double[] p0 = points.get(j0);
+            double[] p1 = points.get(j1);
+            double lat = p0[0] + w * (p1[0] - p0[0]);
+            double lon = p0[1] + w * (p1[1] - p0[1]);
+            result.add(new double[]{lat, lon});
+        }
+    }
+    logger.info("Resampled route to {} points", result);
+    return result;
+}
+
+/**
+ * Build a fixed-length route-shape feature vector for clustering:
+ * [lat1, lon1, lat2, lon2, ..., latN, lonN].
+ * Falls back to straight line if OSRM fails.
+ */
+public List<Double> buildRouteFeatureVector(double pickupLat,
+                                            double pickupLon,
+                                            double dropoffLat,
+                                            double dropoffLon) {
+    List<double[]> points = fetchRoutePoints(pickupLat, pickupLon, dropoffLat, dropoffLon);
+
+    // Fallback to straight line if OSRM failed
+    if (points.isEmpty()) {
+        points = List.of(
+                new double[]{pickupLat, pickupLon},
+                new double[]{dropoffLat, dropoffLon}
+        );
+    }
+
+    List<double[]> sampled = resampleRoute(points, ROUTE_SAMPLES);
+    if (sampled.isEmpty()) {
+        sampled = resampleRoute(
+                List.of(
+                        new double[]{pickupLat, pickupLon},
+                        new double[]{dropoffLat, dropoffLon}
+                ),
+                ROUTE_SAMPLES
+        );
+    }
+
+    List<Double> features = new ArrayList<>(2 * ROUTE_SAMPLES);
+    for (double[] p : sampled) {
+        features.add(p[0]); // lat
+        features.add(p[1]); // lon
+    }
+    logger.info("Built route feature vector with {} points", features);
+    return features;
+}
+
+/**
+ * Simple helper to enforce "nearby pickup & dropoff" when using clusters.
+ */
+public boolean areRidesClose(Ride a, Ride b) {
+    double pickupDistKm = calculateDistance(
+            a.getPickupLat(), a.getPickupLon(),
+            b.getPickupLat(), b.getPickupLon()
+    );
+    double dropoffDistKm = calculateDistance(
+            a.getDropoffLat(), a.getDropoffLon(),
+            b.getDropoffLat(), b.getDropoffLon()
+    );
+
+    return pickupDistKm <= MAX_PICKUP_DIST_KM && dropoffDistKm <= MAX_DROPOFF_DIST_KM;
+}
 
     public Integer getUserTrustScore(Long userId) {
         User user = userRepository.findById(userId).orElseThrow(() -> new IllegalArgumentException("User not found: " + userId));
@@ -167,8 +327,12 @@ private double calculateDistance(double lat1, double lon1, double lat2, double l
         String response = restTemplate.getForObject(url, String.class);
         ObjectMapper mapper = new ObjectMapper();
         JsonNode root = mapper.readTree(response);
+        
+        
         if (root.has("routes") && !root.get("routes").isEmpty()) {
+            logger.info("OSRM route found between ({}, {}) and ({}, {})", lat1, lon1, lat2, lon2);
             return root.get("routes").get(0).get("distance").asDouble() / 1000.0; // km
+            
         }
     } catch (Exception e) {
         logger.warn("OSRM API failed, fallback to Haversine: {}", e.getMessage());
@@ -180,6 +344,7 @@ private double calculateDistance(double lat1, double lon1, double lat2, double l
                Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
                Math.sin(dLon / 2) * Math.sin(dLon / 2);
     double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    logger.info("Haversine distance calculated between ({}, {}) and ({}, {})", lat1, lon1, lat2, lon2);
     return EARTH_RADIUS * c;
 }
 
@@ -191,35 +356,37 @@ private double calculateDistance(double lat1, double lon1, double lat2, double l
         return lon >= -180 && lon <= 180;
     }
 
-    public Map<String, Double> geocode(String address) {
-        String cacheKey = "geocode:" + address.toLowerCase().replace(" ", "_");
-        @SuppressWarnings("unchecked")
-        Map<String, Double> cached = (Map<String, Double>) redisTemplate.opsForValue().get(cacheKey);
-        if (cached != null) {
-            logger.info("Geocode cache hit for: {}", address);
-            return cached;
+public Map<String, Double> geocode(String address) {
+        String url = "https://api.geoapify.com/v1/geocode/search?text="
+                + URLEncoder.encode(address, StandardCharsets.UTF_8)
+                + "&filter=countrycode:in&limit=1&apiKey=" + GEOAPIFY_API_KEY;
+
+        ResponseEntity<Map> response = restTemplate.getForEntity(url, Map.class);
+        Map body = response.getBody();
+        if (body == null) {
+            logger.warn("Empty response body from Geoapify for address: {}", address);
+            return null;
         }
 
-        try {
-            String url = "https://nominatim.openstreetmap.org/search?q=" + URLEncoder.encode(address, StandardCharsets.UTF_8) + "&format=json&limit=1";
-            ResponseEntity<List<Map<String, String>>> response = restTemplate.exchange(url, HttpMethod.GET, null, new ParameterizedTypeReference<List<Map<String, String>>>() {});
-            if (response.getBody() != null && !response.getBody().isEmpty()) {
-                Map<String, String> result = response.getBody().get(0);
-                Map<String, Double> location = Map.of(
-                    "lat", Double.parseDouble(result.get("lat")),
-                    "lon", Double.parseDouble(result.get("lon"))
-                );
-                redisTemplate.opsForValue().set(cacheKey, location, Duration.ofDays(7));
-                logger.info("Geocoded address: {} -> {}", address, location);
-                return location;
-            }
-            logger.warn("No geocode results for: {}", address);
-            return null;
-        } catch (Exception e) {
-            logger.error("Geocoding failed for {}: {}", address, e.getMessage());
+        List features = (List) body.get("features");
+        if (features == null || features.isEmpty()) {
+            logger.warn("No features returned from Geoapify for address: {}", address);
             return null;
         }
-    }
+
+        Map first = (Map) features.get(0);
+        Map geometry = (Map) first.get("geometry");
+        List coords = (List) geometry.get("coordinates");
+
+        double lon = ((Number) coords.get(0)).doubleValue();
+        double lat = ((Number) coords.get(1)).doubleValue();
+
+        logger.info("Geocoded address: {} -> lat: {}, lon: {}", address, lat, lon);
+
+        return Map.of("lat", lat, "lon", lon);
+   
+}
+
 
     public Map<String, String> reverseGeocode(double lat, double lon) {
         String cacheKey = String.format("reverse-geocode:%.6f,%.6f", lat, lon);

@@ -24,10 +24,22 @@ class SentimentRequest(BaseModel):
 class SentimentResponse(BaseModel):
     score: float  # [-1, 1]
 class Rider(BaseModel):
+    # Accept exactly what Java sends:
     lat: float
     lon: float
-    trust_score: int   # kept for compatibility, NOT used in clustering
-    ride_id: int       # used to track rides
+    rideid: int
+    trustscore: int
+    route_features: list[float]
+    def normalized_rideid(self) -> int:
+        return self.rideid if self.rideid is not None else int(self.ride_id)
+
+    def normalized_trustscore(self) -> int:
+        return self.trustscore if self.trustscore is not None else int(self.trust_score)
+
+    def normalized_route_features(self) -> list[float]:
+        if self.route_features is not None:
+            return self.route_features
+        return self.routefeatures or []
 
 class ClusterRequest(BaseModel):
     riders: list[Rider]
@@ -103,26 +115,27 @@ def cluster_riders(request: ClusterRequest):
     try:
         riders = request.riders
         if not riders:
-            return {"error": "No riders provided"}
+            return []
 
-        # Single rider: trivial cluster 0
+        # Single rider: trivial cluster 0 (unchanged behavior)
         if len(riders) == 1:
             r = riders[0]
             return [{
-                "ride_id": r.ride_id,
+                "ride_id": r.normalized_rideid(),
                 "lat": r.lat,
                 "lon": r.lon,
-                "trust_score": r.trust_score,
+                "trust_score": r.normalized_trustscore(),
                 "cluster": 0
             }]
 
-        # Feature matrix: ONLY lat, lon (trust_score ignored for clustering)
-        data = np.array([[r.lat, r.lon] for r in riders], dtype=float)
+        # Use precomputed route_features only for clustering (unchanged behavior)
+        feature_rows = [r.normalized_route_features() for r in riders]
+        data = np.array(feature_rows, dtype=float)
 
         scaler = MinMaxScaler()
         scaled_data = scaler.fit_transform(data)
 
-        # Small-N behavior: avoid over-splitting
+        # Small-N behavior (unchanged behavior)
         n_riders = len(riders)
         if n_riders <= 3:
             n_clusters = 1
@@ -131,25 +144,21 @@ def cluster_riders(request: ClusterRequest):
         else:
             n_clusters = min(3, n_riders)
 
-        kmeans = KMeans(
-            n_clusters=n_clusters,
-            n_init=10,
-            random_state=42
-        )
+        kmeans = KMeans(n_clusters=n_clusters, n_init=10, random_state=42)
         labels = kmeans.fit_predict(scaled_data)
 
         clusters = []
-        for i, rider in enumerate(riders):
+        for i, r in enumerate(riders):
             clusters.append({
-                "ride_id": rider.ride_id,
-                "lat": rider.lat,
-                "lon": rider.lon,
-                "trust_score": rider.trust_score,  # echoed back only
+                "ride_id": r.normalized_rideid(),
+                "lat": r.lat,
+                "lon": r.lon,
+                "trust_score": r.normalized_trustscore(),
                 "cluster": int(labels[i])
             })
 
         logger.info(
-            "Clustered %d riders into %d clusters",
+            "Clustered %d riders into %d clusters (route_features)",
             len(riders),
             len(set(labels))
         )
@@ -158,3 +167,8 @@ def cluster_riders(request: ClusterRequest):
     except Exception as e:
         logger.error("Clustering failed: %s", str(e))
         return {"error": str(e)}
+    
+
+
+
+    

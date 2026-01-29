@@ -90,7 +90,7 @@ public class RideController {
     public ResponseEntity<Map<String, Double>> geocode(@RequestParam String address) {
         Map<String, Double> location = rideService.geocode(address);
         if (location == null) {
-            return ResponseEntity.badRequest().build();
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
         }
         return ResponseEntity.ok(location);
     }

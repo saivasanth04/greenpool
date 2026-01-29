@@ -1,5 +1,4 @@
 package com.example.service;
-
 import com.example.dto.ClusterResponse;
 import com.example.entity.Ride;
 import com.example.entity.RideMatch;
@@ -82,25 +81,36 @@ public class KafkaConsumerService {
             logger.info("Found {} nearby rides for Ride ID {}", nearbyRides.size(), rideId);
 
             // 2) Prepare riders payload for FastAPI
-            List<Map<String, Object>> riders = new ArrayList<>();
-            for (Ride r : nearbyRides) {
-                Map<String, Object> rider = new HashMap<>();
-                rider.put("lat", r.getPickupLat());
-                rider.put("lon", r.getPickupLon());
-                // Still send trust score for compatibility; FastAPI ignores it in clustering
-                rider.put("trust_score", rideService.getUserTrustScore(r.getUserId()));
-                rider.put("ride_id", r.getId());
-                riders.add(rider);
-            }
+List<Map<String, Object>> riders = new ArrayList<>();
+for (Ride r : nearbyRides) {
+    Map<String, Object> rider = new HashMap<>();
 
-            Map<String, Object> clusterRequest = Map.of("riders", riders);
+    // Route-shape feature vector from RideService
+    List<Double> routeFeatures = rideService.buildRouteFeatureVector(
+            r.getPickupLat(),
+            r.getPickupLon(),
+            r.getDropoffLat(),
+            r.getDropoffLon()
+    );
 
-            // 3) Call FastAPI /cluster
-            ClusterResponse[] clusters = restTemplate.postForObject(
-                    clusterUrl,
-                    clusterRequest,
-                    ClusterResponse[].class
-            );
+    rider.put("lat", r.getPickupLat());   // keep for display
+    rider.put("lon", r.getPickupLon());
+    rider.put("route_features", routeFeatures);
+    rider.put("trustscore", rideService.getUserTrustScore(r.getUserId()));
+    rider.put("rideid", r.getId());
+
+    riders.add(rider);
+}
+
+Map<String, Object> clusterRequest = Map.of("riders", riders);
+
+ClusterResponse[] clusters = restTemplate.postForObject(
+        "http://person-detector:8000/cluster",
+        clusterRequest,
+        ClusterResponse[].class
+);
+
+
 
             logger.info("Clusters received: {}", Arrays.toString(clusters));
 
@@ -122,41 +132,54 @@ logger.info("Clustering request for h3Index={}, rideId={}", h3Index, rideIdStrin
 logger.info("Clusters response: {}", Arrays.toString(clusters));
 
             // 5) For EACH ride in each cluster, create/update RideMatch
-            for (Map.Entry<Integer, List<Long>> entry : clusterMap.entrySet()) {
-                int clusterId = entry.getKey();
-                List<Long> rideIdsInCluster = entry.getValue()
-                        .stream()
-                        .distinct()
-                        .collect(Collectors.toList());
+// 5) For EACH ride in each cluster, create/update RideMatch with distance constraint
+for (Map.Entry<Integer, List<Long>> entry : clusterMap.entrySet()) {
+    int clusterId = entry.getKey();
+    List<Long> rideIdsInCluster = entry.getValue()
+            .stream()
+            .distinct()
+            .collect(Collectors.toList());
 
-                for (Long rId : rideIdsInCluster) {
-                    // All other rides in same cluster except self
-                    List<Long> matchedIds = rideIdsInCluster.stream()
-                            .filter(otherId -> !otherId.equals(rId))
-                            .collect(Collectors.toList());
+    for (Long rId : rideIdsInCluster) {
+        // Load the main ride for this match
+        Ride mainRide = rideRepository.findById(rId).orElse(null);
+        if (mainRide == null) {
+            logger.warn("Main ride not found for id {} in cluster {}", rId, clusterId);
+            continue;
+        }
 
-                    // Remove old matches for this ride to avoid duplicates/stale data
-                    rideMatchRepository.deleteByRideId(rId);
+        // All other rides in same cluster except self AND close in pickup & dropoff
+        List<Long> matchedIds = rideIdsInCluster.stream()
+                .filter(otherId -> !otherId.equals(rId))
+                .map(otherId -> rideRepository.findById(otherId).orElse(null))
+                .filter(Objects::nonNull)
+                .filter(otherRide -> rideService.areRidesClose(mainRide, otherRide))
+                .map(Ride::getId)
+                .collect(Collectors.toList());
 
-                    if (!matchedIds.isEmpty()) {
-                        RideMatch match = new RideMatch();
-                        match.setRideId(rId);
-                        match.setMatchedRideIds(matchedIds);
-                        match.setClusterId(clusterId);
-                        rideMatchRepository.save(match);
+        // Remove old matches for this ride to avoid duplicates/stale data
+        rideMatchRepository.deleteByRideId(rId);
 
-                        logger.info(
-                                "Saved cluster {} for ride {} with matches {}",
-                                clusterId, rId, matchedIds
-                        );
-                    } else {
-                        logger.info(
-                                "Cluster {} for ride {} has no other rides, skipping",
-                                clusterId, rId
-                        );
-                    }
-                }
-            }
+        if (!matchedIds.isEmpty()) {
+            RideMatch match = new RideMatch();
+            match.setRideId(rId);
+            match.setMatchedRideIds(matchedIds);
+            match.setClusterId(clusterId);
+            rideMatchRepository.save(match);
+
+            logger.info(
+                    "Saved cluster {} for ride {} with matches {} (after distance filter)",
+                    clusterId, rId, matchedIds
+            );
+        } else {
+            logger.info(
+                    "Cluster {} for ride {} has no nearby rides after distance filter, skipping",
+                    clusterId, rId
+            );
+        }
+    }
+}
+
             
 
         } catch (Exception e) {

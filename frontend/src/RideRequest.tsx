@@ -143,11 +143,13 @@ const RideRequest: React.FC = () => {
     searchTimeout.current = setTimeout(async () => {
       try {
         setLoading(true);
+        console.log('Attempting geocode for:', query);
         const res = await axios.get<{ lat: number; lon: number }>(`${API_BASE}/api/rides/geocode`, {
           params: { address: query },
           withCredentials: true,
           timeout: 5000, // Added timeout
         });
+        console.log('Geocode response:', res.data);
         const { lat, lon } = res.data;
         if (!isValidCoord(lat, lon)) {
           toast.error('Invalid location coordinates.');
