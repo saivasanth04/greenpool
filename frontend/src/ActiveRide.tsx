@@ -10,11 +10,10 @@ import {
   Marker,
   Popup,
   Polyline,
-  useMap, // ADDED: For dynamic map updates
+  useMap,
 } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 
-// Fix default Leaflet icons
 import markerIcon from "leaflet/dist/images/marker-icon.png";
 import markerIcon2x from "leaflet/dist/images/marker-icon-2x.png";
 import markerShadow from "leaflet/dist/images/marker-shadow.png";
@@ -32,7 +31,12 @@ interface Ride {
   dropoffLat: number;
   dropoffLon: number;
   dropoffAddress: string;
+  status: string;
+  pickupLat: number;
+  pickupLon: number;
+  pickupAddress: string;
 }
+
 interface Match {
   id: number;
   fromRideId: number;
@@ -40,7 +44,6 @@ interface Match {
   status: string;
 }
 
-// Icons
 const userIcon = new L.Icon({
   iconUrl: "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-green.png",
   iconSize: [25, 41],
@@ -63,7 +66,6 @@ const formatDistance = (meters: number | null) => {
   return `${(meters / 1000).toFixed(2)} km`;
 };
 
-// ADDED: Component to dynamically update map view when position changes
 function MapUpdater({ position }: { position: [number, number] | null }) {
   const map = useMap();
   useEffect(() => {
@@ -83,47 +85,108 @@ const ActiveRide: React.FC = () => {
   const [routeCoords, setRouteCoords] = useState<L.LatLng[]>([]);
   const [loading, setLoading] = useState(true);
   const [journeyStarted, setJourneyStarted] = useState(false);
-
-  // New: distance in meters (null = unknown)
   const [distanceMeters, setDistanceMeters] = useState<number | null>(null);
+  const [waitingForPartner, setWaitingForPartner] = useState(false);
+  const [rideChecked, setRideChecked] = useState(false);
 
-  // 1. Load ride & match
+  // CRITICAL FIX: Check active ride only once on mount, don't redirect immediately
   useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
+    const checkActiveRide = async () => {
       try {
-        const r = await axios.get<Ride>(`${API_BASE}/api/rides/active`, { withCredentials: true });
-        if (!r.data) return navigate("/home");
+        const r = await axios.get<Ride | null>(`${API_BASE}/api/rides/active`, { 
+          withCredentials: true,
+          timeout: 5000
+        });
+        
+        // If no active ride and no completed ride needing feedback
+        if (!r.data) {
+          console.log("No active ride found");
+          setRideChecked(true);
+          setLoading(false);
+          // Only navigate if we're sure there's no ride
+          // Don't navigate immediately - let user see "no active ride" message
+          return;
+        }
 
-        const m = await axios.get<Match[]>(`${API_BASE}/api/rides/matches/confirmed`, { withCredentials: true });
-        const match = m.data.find(x => x.fromRideId === r.data.id || x.toRideId === r.data.id);
+        // If ride is COMPLETED, go to feedback immediately
+        if (r.data.status === "COMPLETED") {
+          console.log("Ride completed, redirecting to feedback");
+          navigate(`/ride/${r.data.id}/feedback`);
+          return;
+        }
 
-        if (!cancelled) {
-          setRide(r.data);
+        setRide(r.data);
+        setRideChecked(true);
+        
+        // Check for confirmed match
+        try {
+          const m = await axios.get<Match[]>(`${API_BASE}/api/rides/matches/confirmed`, { 
+            withCredentials: true,
+            timeout: 5000
+          });
+          const match = m.data.find(x => x.fromRideId === r.data?.id || x.toRideId === r.data?.id);
           setMatchId(match?.id ?? null);
+        } catch (err) {
+          console.error("Error fetching matches:", err);
+        }
+        
+        setLoading(false);
+      } catch (err: any) {
+        console.error("Error checking active ride:", err);
+        if (err.response?.status === 401 || err.response?.status === 403) {
+          toast.error("Session expired. Please login again.");
+          navigate("/login");
+        } else {
+          setRideChecked(true);
           setLoading(false);
         }
-      } catch {
-        if (!cancelled) navigate("/home");
       }
     };
-    load();
-    return () => { cancelled = true; };
+
+    checkActiveRide();
   }, [navigate]);
 
-  // 2. Start journey
+  // Poll for ride status changes (for when partner ends ride)
+  useEffect(() => {
+    if (!ride?.id || ride.status === "COMPLETED") return;
+
+    const pollInterval = setInterval(async () => {
+      try {
+        const res = await axios.get<Ride>(`${API_BASE}/api/rides/${ride.id}`, { 
+          withCredentials: true,
+          timeout: 3000
+        });
+        
+        // If ride became completed, redirect to feedback
+        if (res.data.status === "COMPLETED") {
+          toast.success("Ride completed by partner!");
+          navigate(`/ride/${ride.id}/feedback`);
+        }
+      } catch (err) {
+        // Silent fail on polling errors
+        console.log("Polling error:", err);
+      }
+    }, 5000); // Poll every 5 seconds
+
+    return () => clearInterval(pollInterval);
+  }, [ride?.id, ride?.status, navigate]);
+
   const startJourney = async () => {
-    if (!matchId) return toast.error("No match");
+    if (!matchId) return toast.error("No match found");
     try {
-      await axios.post(`${API_BASE}/api/rides/match/start/${matchId}`, {}, { withCredentials: true });
+      await axios.post(`${API_BASE}/api/rides/match/start/${matchId}`, {}, { 
+        withCredentials: true,
+        timeout: 10000
+      });
       toast.success("Journey started!");
       setJourneyStarted(true);
-    } catch {
-      toast.error("Failed to start journey");
+    } catch (err: any) {
+      console.error("Start journey error:", err);
+      toast.error(err.response?.data?.message || "Failed to start journey");
     }
   };
 
-  // 3. GPS – only after journey started
+  // GPS tracking only after journey starts
   useEffect(() => {
     if (!journeyStarted || !navigator.geolocation) return;
 
@@ -131,7 +194,7 @@ const ActiveRide: React.FC = () => {
       pos => {
         const p: [number, number] = [pos.coords.latitude, pos.coords.longitude];
         setUserPos(p);
-        setCarPos(p); // car = real GPS position
+        setCarPos(p);
       },
       err => console.warn("GPS error", err),
       { enableHighAccuracy: true, timeout: 10000, maximumAge: 2000 }
@@ -140,92 +203,138 @@ const ActiveRide: React.FC = () => {
     return () => navigator.geolocation.clearWatch(watchId);
   }, [journeyStarted]);
 
-  // 4. Real road route (OSRM) + distance
+  // Route calculation
   useEffect(() => {
     if (!ride || !userPos) return;
 
     const fetchRoute = async () => {
       const url = `https://router.project-osrm.org/route/v1/driving/${userPos[1]},${userPos[0]};${ride.dropoffLon},${ride.dropoffLat}?overview=full&geometries=geojson`;
       try {
-        const res = await axios.get(url);
+        const res = await axios.get(url, { timeout: 5000 });
         const coords = res.data.routes[0].geometry.coordinates.map(
           ([lng, lat]: [number, number]) => L.latLng(lat, lng)
         );
         setRouteCoords(coords);
-        setDistanceMeters(res.data.routes[0].distance); // FIXED: Use OSRM driving distance (meters)
+        setDistanceMeters(res.data.routes[0].distance);
       } catch {
         setRouteCoords([
           L.latLng(userPos[0], userPos[1]),
           L.latLng(ride.dropoffLat, ride.dropoffLon),
         ]);
-        // Fallback to straight-line
         const from = L.latLng(userPos[0], userPos[1]);
         const to = L.latLng(ride.dropoffLat, ride.dropoffLon);
         setDistanceMeters(from.distanceTo(to));
       }
     };
     fetchRoute();
-  }, [ride, userPos]); // Re-fetch on position change for updated route/distance
+  }, [ride, userPos]);
 
+  // Location updates to backend
   useEffect(() => {
+    if (!userPos || !ride?.id || !journeyStarted) return;
+
     const interval = setInterval(async () => {
-      if (userPos && ride?.id) {
-        await axios.post(`${API_BASE}/api/rides/${ride.id}/location`, null, { params: { lat: userPos[0], lon: userPos[1] },withCredentials: true });
+      try {
+        await axios.post(`${API_BASE}/api/rides/${ride.id}/location`, null, { 
+          params: { lat: userPos[0], lon: userPos[1] }, 
+          withCredentials: true,
+          timeout: 5000
+        });
+      } catch (err) {
+        console.error("Location update error:", err);
       }
     }, 20000);
+    
     return () => clearInterval(interval);
   }, [userPos, ride?.id, journeyStarted]);
 
-  // REMOVED: Old straight-line distance useEffect (now handled in fetchRoute)
+  const endJourney = async () => {
+    if (!matchId) return toast.error("No match found");
 
-  // 5. End journey
-const endJourney = async () => {
-  if (!matchId) return toast.error("No match");
+    try {
+      const res = await axios.post(
+        `${API_BASE}/api/rides/match/end/${matchId}`,
+        {},
+        { 
+          withCredentials: true,
+          timeout: 10000
+        }
+      );
 
-  try {
-    const res = await axios.post(
-      `${API_BASE}/api/rides/match/end/${matchId}`,
-      {},
-      { withCredentials: true }
-    );
+      const data = res.data as { 
+        message?: string; 
+        rideId?: number; 
+        completedForBoth?: boolean;
+        redirectToFeedback?: boolean;
+      };
 
-    // Backend now returns: { message?: string, rideId?: number }
-    const data = res.data as { message?: string; rideId?: number };
-
-    toast.success(data.message || "Ride completed!");
-
-    if (data.rideId) {
-      // Go to feedback page for this ride
-      navigate(`/ride/${data.rideId}/feedback`);
-    } else {
-      // Fallback: go back home if no rideId in response
-      navigate("/home");
+      if (data.completedForBoth || data.redirectToFeedback) {
+        toast.success(data.message || "Ride completed!");
+        if (data.rideId) {
+          // Small delay to ensure backend state is committed
+          setTimeout(() => {
+            navigate(`/ride/${data.rideId}/feedback`);
+          }, 500);
+        }
+      } else {
+        setWaitingForPartner(true);
+        toast.info(data.message || "Waiting for partner to end ride...");
+      }
+    } catch (err: any) {
+      console.error("End journey error:", err);
+      if (err.response?.status === 401 || err.response?.status === 403) {
+        toast.error("Session expired. Please login again.");
+        navigate("/login");
+      } else {
+        toast.error(err.response?.data?.message || "Failed to end ride");
+      }
     }
-  } catch (err) {
-    console.error("Failed to end ride", err);
-    toast.error("Failed to end ride");
+  };
+
+  // Show "No Active Ride" state
+  if (rideChecked && !ride && !loading) {
+    return (
+      <div style={{ 
+        height: "100vh", 
+        display: "flex", 
+        flexDirection: "column",
+        alignItems: "center", 
+        justifyContent: "center",
+        gap: "20px"
+      }}>
+        <h2>No Active Ride</h2>
+        <p>You don't have any active rides at the moment.</p>
+        <button 
+          onClick={() => navigate("/home")}
+          style={{
+            padding: "12px 24px",
+            background: "#007bff",
+            color: "#fff",
+            border: "none",
+            borderRadius: "8px",
+            cursor: "pointer"
+          }}
+        >
+          Go to Home
+        </button>
+      </div>
+    );
   }
-};
 
-
-  if (loading)
+  if (loading || !rideChecked) {
     return (
       <div style={{ height: "100vh", display: "grid", placeItems: "center" }}>
         Loading ride…
       </div>
     );
+  }
 
   return (
     <div style={{ height: "100vh", width: "100vw", position: "relative" }}>
-      {/* Map – whenReady has correct signature */}
       <MapContainer
         center={userPos || (ride ? [ride.dropoffLat, ride.dropoffLon] : [17.385, 78.4867])}
         zoom={16}
         style={{ height: "100%", width: "100%" }}
-        whenReady={() => {
-          // This is the correct signature – no parameter needed
-          // You can call invalidateSize here if you want
-        }}
       >
         <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
 
@@ -251,10 +360,9 @@ const endJourney = async () => {
           <Polyline positions={routeCoords} color="#3388ff" weight={6} opacity={0.7} />
         )}
 
-        <MapUpdater position={userPos} /> {/* ADDED: Dynamically recenter on userPos changes */}
+        <MapUpdater position={userPos} />
       </MapContainer>
 
-      {/* Buttons + distance display */}
       <div
         style={{
           position: "absolute",
@@ -292,17 +400,20 @@ const endJourney = async () => {
             Start Journey
           </button>
         ) : (
-          <button onClick={endJourney} style={{
-            padding: "16px 40px",
-            background: "#d32f2f",
-            color: "#fff",
-            border: "none",
-            borderRadius: 30,
-            fontSize: 18,
-            fontWeight: "bold",
-            cursor: "pointer",
-          }}>
-            End Journey
+          <button
+            onClick={endJourney}
+            disabled={waitingForPartner}
+            style={{
+              padding: "16px 40px",
+              background: waitingForPartner ? "#9e9e9e" : "#d32f2f",
+              color: "#fff",
+              border: "none",
+              borderRadius: 30,
+              fontSize: 18,
+              fontWeight: "bold",
+              cursor: waitingForPartner ? "default" : "pointer",
+            }}>
+            {waitingForPartner ? "Waiting for Partner..." : "End Journey"}
           </button>
         )}
       </div>

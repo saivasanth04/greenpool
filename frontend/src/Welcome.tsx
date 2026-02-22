@@ -1,7 +1,7 @@
 // src/pages/Welcome.tsx
 import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import api from "./api";
+import { api } from "./api";
 import "./Welcome.css";
 
 const MINIO_BASE = "http://localhost:9000/profiles";
@@ -17,7 +17,7 @@ const Welcome: React.FC = () => {
   useEffect(() => {
     const load = async () => {
       try {
-        const { data } = await api.get("/auth/me");
+        const { data } = await api.get("/api/auth/me");
         if (data.error) {
           setError(data.error);
           setTrustScore("NA");

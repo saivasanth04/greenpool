@@ -7,8 +7,8 @@ import org.springframework.data.redis.repository.configuration.EnableRedisReposi
 import org.springframework.scheduling.annotation.EnableScheduling;
 
 @SpringBootApplication
-@EnableJpaRepositories(basePackages = "com.example.repository")
-@EnableRedisRepositories
+@EnableJpaRepositories(basePackages = "com.example.repository", excludeFilters = @org.springframework.context.annotation.ComponentScan.Filter(type = org.springframework.context.annotation.FilterType.REGEX, pattern = "com\\.example\\.repository\\.redis\\..*"))
+@EnableRedisRepositories(basePackages = "com.example.repository.redis")
 @EnableScheduling
 public class BackendApplication {
     public static void main(String[] args) {

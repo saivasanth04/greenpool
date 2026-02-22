@@ -2,6 +2,7 @@
 package com.example.entity;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 import org.hibernate.annotations.CreationTimestamp;
 
@@ -13,14 +14,15 @@ import jakarta.validation.constraints.NotNull;
 
 @Entity
 @Table(name = "rides", indexes = {
-    @Index(name = "idx_status", columnList = "status"),
-    @Index(name = "idx_h3index", columnList = "h3_index"),
-    @Index(name = "idx_user_id", columnList = "user_id")
+        @Index(name = "idx_status", columnList = "status"),
+        @Index(name = "idx_h3index", columnList = "h3_index"),
+        @Index(name = "idx_user_id", columnList = "user_id")
 })
 public class Ride {
     public enum RideStatus {
-    PENDING, CONFIRMED, IN_PROGRESS, COMPLETED, CANCELLED
-}
+        PENDING, CONFIRMED, IN_PROGRESS, COMPLETED, CANCELLED
+    }
+
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
@@ -44,8 +46,8 @@ public class Ride {
     private double dropoffLat;
 
     @CreationTimestamp
-@Column(updatable = false)
-private LocalDateTime createdAt;
+    @Column(updatable = false)
+    private LocalDateTime createdAt;
 
     @NotNull
     @Min(-180)
@@ -54,8 +56,8 @@ private LocalDateTime createdAt;
     private double dropoffLon;
 
     @Enumerated(EnumType.STRING)
-@Column(name = "status", nullable = false)
-private RideStatus status = RideStatus.PENDING;
+    @Column(name = "status", nullable = false)
+    private RideStatus status = RideStatus.PENDING;
 
     @Column(name = "carbon_estimate")
     private double carbonEstimate;
@@ -66,7 +68,7 @@ private RideStatus status = RideStatus.PENDING;
 
     @NotNull
     @Column(name = "user_id", nullable = false)
-    private Long userId;  // Link to User entity (add @ManyToOne if full relation)
+    private Long userId; // Link to User entity (add @ManyToOne if full relation)
 
     @Column(name = "pickup_address")
     private String pickupAddress;
@@ -78,34 +80,119 @@ private RideStatus status = RideStatus.PENDING;
 
     @Column(name = "current_lon")
     private Double currentLon = 0.0;
+
+    @ElementCollection
+    @CollectionTable(name = "ride_route_features", joinColumns = @JoinColumn(name = "ride_id"))
+    @Column(name = "feature_value")
+    private List<Double> routeFeatures;
+
     // Getters and Setters
     // In Ride entity (add if missing)
 
+    public List<Double> getRouteFeatures() {
+        return routeFeatures;
+    }
 
-public LocalDateTime getCreatedAt() { return createdAt; }
-public void setCreatedAt(LocalDateTime createdAt) { this.createdAt = createdAt; }
-    public Long getId() { return id; }
-    public void setId(Long id) { this.id = id; }
-    public double getPickupLat() { return pickupLat; }
-    public void setPickupLat(double pickupLat) { this.pickupLat = pickupLat; }
-    public double getPickupLon() { return pickupLon; }
-    public void setPickupLon(double pickupLon) { this.pickupLon = pickupLon; }
-    public double getDropoffLat() { return dropoffLat; }
-    public void setDropoffLat(double dropoffLat) { this.dropoffLat = dropoffLat; }
-    public double getDropoffLon() { return dropoffLon; }
-    public void setDropoffLon(double dropoffLon) { this.dropoffLon = dropoffLon; }
-    public RideStatus getStatus() { return status; }
-public void setStatus(RideStatus status) { this.status = status; }
-    public double getCarbonEstimate() { return carbonEstimate; }
-    public void setCarbonEstimate(double carbonEstimate) { this.carbonEstimate = carbonEstimate; }
-    public String getH3Index() { return h3Index; }
-    public void setH3Index(String h3Index) { this.h3Index = h3Index; }
-    public Long getUserId() { return userId; }
-    public void setUserId(Long userId) { this.userId = userId; }
-    public String getPickupAddress() { return pickupAddress; }
-    public void setPickupAddress(String pickupAddress) { this.pickupAddress = pickupAddress; }
-    public String getDropoffAddress() { return dropoffAddress; }
-    public void setDropoffAddress(String dropoffAddress) { this.dropoffAddress = dropoffAddress; }
+    public void setRouteFeatures(List<Double> routeFeatures) {
+        this.routeFeatures = routeFeatures;
+    }
+
+    public LocalDateTime getCreatedAt() {
+        return createdAt;
+    }
+
+    public void setCreatedAt(LocalDateTime createdAt) {
+        this.createdAt = createdAt;
+    }
+
+    public Long getId() {
+        return id;
+    }
+
+    public void setId(Long id) {
+        this.id = id;
+    }
+
+    public double getPickupLat() {
+        return pickupLat;
+    }
+
+    public void setPickupLat(double pickupLat) {
+        this.pickupLat = pickupLat;
+    }
+
+    public double getPickupLon() {
+        return pickupLon;
+    }
+
+    public void setPickupLon(double pickupLon) {
+        this.pickupLon = pickupLon;
+    }
+
+    public double getDropoffLat() {
+        return dropoffLat;
+    }
+
+    public void setDropoffLat(double dropoffLat) {
+        this.dropoffLat = dropoffLat;
+    }
+
+    public double getDropoffLon() {
+        return dropoffLon;
+    }
+
+    public void setDropoffLon(double dropoffLon) {
+        this.dropoffLon = dropoffLon;
+    }
+
+    public RideStatus getStatus() {
+        return status;
+    }
+
+    public void setStatus(RideStatus status) {
+        this.status = status;
+    }
+
+    public double getCarbonEstimate() {
+        return carbonEstimate;
+    }
+
+    public void setCarbonEstimate(double carbonEstimate) {
+        this.carbonEstimate = carbonEstimate;
+    }
+
+    public String getH3Index() {
+        return h3Index;
+    }
+
+    public void setH3Index(String h3Index) {
+        this.h3Index = h3Index;
+    }
+
+    public Long getUserId() {
+        return userId;
+    }
+
+    public void setUserId(Long userId) {
+        this.userId = userId;
+    }
+
+    public String getPickupAddress() {
+        return pickupAddress;
+    }
+
+    public void setPickupAddress(String pickupAddress) {
+        this.pickupAddress = pickupAddress;
+    }
+
+    public String getDropoffAddress() {
+        return dropoffAddress;
+    }
+
+    public void setDropoffAddress(String dropoffAddress) {
+        this.dropoffAddress = dropoffAddress;
+    }
+
     // CHANGE: New getters/setters
     public Double getCurrentLat() {
         return currentLat;

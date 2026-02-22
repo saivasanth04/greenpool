@@ -1,36 +1,11 @@
 // frontend/src/pages/Home.tsx
 import React, { useEffect, useState, useRef } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import axios from 'axios';
 import { toast, ToastContainer } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
-
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8080';
-const MINIO_BASE = 'http://localhost:9000/profiles';
-
-interface RideResponse {
-  id: number;
-  pickupAddress: string;
-  dropoffAddress: string;
-  status: string;
-  carbonEstimate: number;
-  userId: number;
-  h3Index?: string;
-}
-
-interface RideMatchRequestResponse {
-  id: number;
-  fromRideId: number;
-  toRideId: number;
-  status: string;
-}
-
-interface UserProfile {
-  id: number;
-  username: string;
-  trustScore: number;
-  profilePictureUrl: string;
-}
+import { api, getProfileImageUrl } from './api'
+import { RideResponse, RideMatchRequestResponse, UserProfile } from './types';
+import Header from './components/Header';
 
 const Home: React.FC = () => {
   const [rides, setRides] = useState<RideResponse[]>([]);
@@ -49,19 +24,17 @@ const Home: React.FC = () => {
       try {
         setLoading(true);
         const [ridesRes, incomingRes, confirmedRes, activeRes] = await Promise.all([
-          axios.get<RideResponse[]>(`${API_BASE}/api/rides`, { withCredentials: true }),
-          axios.get<RideMatchRequestResponse[]>(`${API_BASE}/api/rides/requests/incoming`, { withCredentials: true }),
-          axios.get<RideMatchRequestResponse[]>(`${API_BASE}/api/rides/matches/confirmed`, { withCredentials: true }),
-          axios.get<RideResponse>(`${API_BASE}/api/rides/active`, { withCredentials: true }),
+          api.get<RideResponse[]>('/api/rides'),
+          api.get<RideMatchRequestResponse[]>('/api/rides/requests/incoming'),
+          api.get<RideMatchRequestResponse[]>('/api/rides/matches/confirmed'),
+          api.get<RideResponse>('/api/rides/active'),
         ]);
 
-        console.log('Rides Response:', ridesRes.data);
-
         const visibleRides = ridesRes.data.filter(
-  (r) => r.status !== 'COMPLETED'
-);
+          (r) => r.status !== 'COMPLETED'
+        );
 
-setRides(visibleRides);
+        setRides(visibleRides);
         setIncomingRequests(incomingRes.data);
         setConfirmedMatches(confirmedRes.data);
         setActiveRide(activeRes.data);
@@ -80,15 +53,9 @@ setRides(visibleRides);
         });
 
         const ridePromises = Array.from(rideIds).map((id) =>
-          axios.get<RideResponse>(`${API_BASE}/api/rides/match/${id}`, { withCredentials: true })
-            .then((res) => {
-              console.log(`Ride ${id} Response:`, res.data);
-              return { id, data: res.data };
-            })
-            .catch((err) => {
-              console.error(`Failed to fetch ride ${id}:`, err);
-              return null;
-            })
+          api.get<RideResponse>(`/api/rides/match/${id}`)
+            .then((res) => ({ id, data: res.data }))
+            .catch(() => null)
         );
         const rideResults = (await Promise.all(ridePromises)).filter((r): r is { id: number; data: RideResponse } => r !== null);
         const rideMap = new Map<number, RideResponse>(rideResults.map((r) => [r.id, r.data]));
@@ -99,20 +66,13 @@ setRides(visibleRides);
         const userIds = new Set<number>();
         rideResults.forEach((r) => userIds.add(r.data.userId));
         const userPromises = Array.from(userIds).map((id) =>
-          axios.get<UserProfile>(`${API_BASE}/api/users/${id}`, { withCredentials: true })
-            .then((res) => {
-              console.log(`User ${id} Response:`, res.data);
-              return { id, data: res.data };
-            })
-            .catch((err) => {
-              console.error(`Failed to fetch user ${id}:`, err);
-              return null;
-            })
+          api.get<UserProfile>(`/api/users/${id}`)
+            .then((res) => ({ id, data: res.data }))
+            .catch(() => null)
         );
         const userResults = (await Promise.all(userPromises)).filter((u): u is { id: number; data: UserProfile } => u !== null);
         setUsers(new Map<number, UserProfile>(userResults.map((u) => [u.id, u.data])));
       } catch (err: any) {
-        console.error('Fetch Data Error:', err);
         toast.error('Session expired. Please log in.');
         navigate('/login');
       } finally {
@@ -123,54 +83,48 @@ setRides(visibleRides);
     fetchData();
 
     // Poll for active ride every 10s
-    pollInterval.current = setInterval(async () => {
-      try {
-        const res = await axios.get<RideResponse>(`${API_BASE}/api/rides/active`, { withCredentials: true });
-        if (res.data && !activeRide) {
-          setActiveRide(res.data);
-          navigate('/ride/active');
-        }
-      } catch (err) {
-        console.error('Poll error:', err);
+// In Home.tsx, replace the active ride check with this:
+
+// Poll for active ride every 10s - BUT don't auto-redirect if user is already on active ride page
+pollInterval.current = setInterval(async () => {
+  try {
+    const res = await api.get<RideResponse>('/api/rides/active');
+    if (res.data) {
+      // Only navigate if we're not already on the active ride page
+      const currentPath = window.location.pathname;
+      if (!currentPath.includes('/ride/active') && res.data.status !== "COMPLETED") {
+        setActiveRide(res.data);
+        navigate('/ride/active');
+      } else if (res.data.status === "COMPLETED" && !currentPath.includes('/feedback')) {
+        // If completed and not on feedback page, go to feedback
+        navigate(`/ride/${res.data.id}/feedback`);
       }
-    }, 10000);
+    }
+  } catch (err) {
+    // ignore - don't logout on polling errors
+    console.log("Active ride poll error:", err);
+  }
+}, 10000);
 
     return () => {
       if (pollInterval.current) clearInterval(pollInterval.current);
     };
   }, [navigate, activeRide]);
 
-  const viewMatches = (rideId: number) => {
-    if (!rideId) {
-      toast.error('Invalid ride ID');
-      return;
-    }
-    navigate(`/ride/matches/${rideId}`);
-  };
-
-  const confirmRequest = async (requestId: number) => {
+  // Actions
+  const handleRequestAction = async (requestId: number, action: 'confirm' | 'reject') => {
     try {
-      await axios.post(`${API_BASE}/api/rides/match/confirm/${requestId}`, {}, { withCredentials: true });
-      toast.success('Match confirmed!');
+      await api.post(`/api/rides/match/${action}/${requestId}`);
+      toast.success(`Match ${action}ed!`);
       window.location.reload();
     } catch {
-      toast.error('Failed to confirm match.');
-    }
-  };
-
-  const rejectRequest = async (requestId: number) => {
-    try {
-      await axios.post(`${API_BASE}/api/rides/match/reject/${requestId}`, {}, { withCredentials: true });
-      toast.success('Match rejected.');
-      window.location.reload();
-    } catch {
-      toast.error('Failed to reject match.');
+      toast.error(`Failed to ${action} match.`);
     }
   };
 
   const startJourney = async (requestId: number) => {
     try {
-      await axios.post(`${API_BASE}/api/rides/match/start/${requestId}`, {}, { withCredentials: true });
+      await api.post(`/api/rides/match/start/${requestId}`);
       toast.success('Start confirmed. Waiting for partner.');
       window.location.reload();
     } catch {
@@ -179,114 +133,128 @@ setRides(visibleRides);
   };
 
   return (
-    <div style={{ padding: '20px', maxWidth: '800px', margin: '0 auto' }}>
-      <h2>EcoRide Hub</h2>
-      {loading && <p>Loading...</p>}
-      <ToastContainer position="top-right" autoClose={3000} />
-      <div style={{ marginBottom: '20px' }}>
-        <Link to="/ride/request">
-          <button style={{ padding: '10px', background: '#007bff', color: 'white', border: 'none', borderRadius: '4px', marginRight: '10px' }}>
-            Request Ride
-          </button>
-        </Link>
-      </div>
-      <h3>Your Rides</h3>
-      {rides.length === 0 ? (
-        <p>No rides found. Request a ride to get started!</p>
-      ) : (
-        <ul style={{ listStyle: 'none', padding: 0 }}>
-          {rides.map((ride) => (
-            ride.id ? (
-              <li key={ride.id} style={{ padding: '10px', border: '1px solid #ccc', marginBottom: '10px', borderRadius: '4px' }}>
-                <p>Ride ID: {ride.id}</p>
-                <p>Status: {ride.status}</p>
-                <p>Pickup: {ride.pickupAddress}</p>
-                <p>Dropoff: {ride.dropoffAddress}</p>
-                <p>User ID: {ride.userId}</p>
-                <p>Carbon Estimate: {ride.carbonEstimate} kg CO2</p>
-                <button
-                  onClick={() => viewMatches(ride.id)}
-                  style={{ padding: '5px 10px', background: '#007bff', color: 'white', border: 'none', borderRadius: '4px' }}
-                >
-                  View Potential Matches
-                </button>
-              </li>
-            ) : null
-          ))}
-        </ul>
-      )}
-      <h3>Pending Incoming Requests</h3>
-      {incomingRequests.length === 0 ? (
-        <p>No pending requests.</p>
-      ) : (
-        <ul style={{ listStyle: 'none', padding: 0 }}>
-          {incomingRequests.map((req) => {
-            const fromRide = requestRides.get(req.fromRideId);
-            const user = fromRide ? users.get(fromRide.userId) : null;
-            return (
-              <li key={req.id} style={{ padding: '10px', border: '1px solid #ccc', marginBottom: '10px', borderRadius: '4px' }}>
-                <p>From Ride Pickup: {fromRide?.pickupAddress || 'Unknown'}</p>
-                <p>From Ride Dropoff: {fromRide?.dropoffAddress || 'Unknown'}</p>
-                {user ? (
-                  <>
-                    <p>Requester: {user.username} (Trust: {user.trustScore})</p>
-                    <img src={`${MINIO_BASE}/${user.profilePictureUrl}`} alt="Profile" style={{ width: '50px', height: '50px', borderRadius: '50%' }} />
-                  </>
-                ) : (
-                  <p>Requester: Unknown</p>
-                )}
-                <button onClick={() => confirmRequest(req.id)} style={{ marginRight: '10px' }}>Confirm</button>
-                <button onClick={() => rejectRequest(req.id)}>Reject</button>
-              </li>
-            );
-          })}
-        </ul>
-      )}
-      <h3>Confirmed Matches</h3>
-      {confirmedMatches.length === 0 ? (
-        <p>No confirmed matches.</p>
-      ) : (
-        <ul style={{ listStyle: 'none', padding: 0 }}>
-          {confirmedMatches.map((match) => {
-            const isToUser = rides.some((r) => r.id === match.toRideId);
-            const partnerRideId = isToUser ? match.fromRideId : match.toRideId;
-            const partnerRide = matchRides.get(partnerRideId);
-            const user = partnerRide ? users.get(partnerRide.userId) : null;
-            return (
-              <li key={match.id} style={{ padding: '10px', border: '1px solid #ccc', marginBottom: '10px', borderRadius: '4px' }}>
-                <p>Partner Pickup: {partnerRide?.pickupAddress || 'Unknown'}</p>
-                <p>Partner Dropoff: {partnerRide?.dropoffAddress || 'Unknown'}</p>
-                {user ? (
-                  <>
-                    <p>Partner: {user.username} (Trust: {user.trustScore})</p>
-                    <img src={`${MINIO_BASE}/${user.profilePictureUrl}`} alt="Profile" style={{ width: '50px', height: '50px', borderRadius: '50%' }} />
-                  </>
-                ) : (
-                  <p>Partner: Unknown</p>
-                )}
-                {match.status === 'CONFIRMED' && (
-                  <button
-                    onClick={() => startJourney(match.id)}
-                    style={{ padding: '5px 10px', background: '#28a745', color: 'white', border: 'none', borderRadius: '4px', marginLeft: '10px' }}
-                  >
-                    Start Journey
-                  </button>
-                )}
-              </li>
-            );
-          })}
-        </ul>
-      )}
+    <>
+      <Header />
+      <div className="gp-container">
+        <ToastContainer position="top-right" autoClose={3000} />
 
-<div style={{ margin: '20px' }}>
-  <button 
-    onClick={() => navigate('/parent/signup')}
-    style={{ padding: '12px 24px', fontSize: '16px' }}
-  >
-    👨‍👩‍👧 Register as Parent
-  </button>
-</div>
-    </div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem' }}>
+          <h2>EcoRide Hub</h2>
+          <Link to="/ride/request">
+            <button className="gp-btn" style={{ width: 'auto' }}>
+              Request New Ride
+            </button>
+          </Link>
+        </div>
+
+        {loading && <p>Loading...</p>}
+
+        <div className="gp-card">
+          <h3>Your Rides</h3>
+          {rides.length === 0 ? (
+            <p>No rides found. Request a ride to get started!</p>
+          ) : (
+            <ul style={{ listStyle: 'none', padding: 0 }}>
+              {rides.map((ride) => (
+                <li key={ride.id} style={{ padding: '15px', borderBottom: '1px solid #eee' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div>
+                      <strong>Ride #{ride.id}</strong> <span style={{ fontSize: '0.8em', color: '#666' }}>{ride.status}</span>
+                      <div>From: {ride.pickupAddress}</div>
+                      <div>To: {ride.dropoffAddress}</div>
+                    </div>
+                    <button
+                      className="gp-btn gp-btn-secondary"
+                      style={{ width: 'auto', padding: '8px 12px', fontSize: '0.9rem' }}
+                      onClick={() => navigate(`/ride/matches/${ride.id}`)}
+                    >
+                      Find Matches
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        <div className="gp-card">
+          <h3>Pending Requests</h3>
+          {incomingRequests.length === 0 ? (
+            <p>No pending requests.</p>
+          ) : (
+            <ul style={{ listStyle: 'none', padding: 0 }}>
+              {incomingRequests.map((req) => {
+                const fromRide = requestRides.get(req.fromRideId);
+                const user = fromRide ? users.get(fromRide.userId) : null;
+                return (
+                  <li key={req.id} style={{ padding: '15px', borderBottom: '1px solid #eee' }}>
+                    <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
+                      {user && <img src={getProfileImageUrl(user.profilePictureUrl)} alt="Profile" style={{ width: '40px', height: '40px', borderRadius: '50%' }} />}
+                      <div style={{ flex: 1 }}>
+                        <div><strong>{user?.username}</strong> wants to match. (Trust: {user?.trustScore})</div>
+                        <div style={{ fontSize: '0.9rem' }}>Pickup: {fromRide?.pickupAddress}</div>
+                      </div>
+                      <div style={{ display: 'flex', gap: '0.5rem' }}>
+                        <button className="gp-btn" style={{ width: 'auto', padding: '5px 10px' }} onClick={() => handleRequestAction(req.id, 'confirm')}>Accept</button>
+                        <button className="gp-btn gp-btn-secondary" style={{ width: 'auto', padding: '5px 10px', background: '#d32f2f' }} onClick={() => handleRequestAction(req.id, 'reject')}>Reject</button>
+                      </div>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+
+        <div className="gp-card">
+          <h3>Confirmed Matches</h3>
+          {confirmedMatches.length === 0 ? (
+            <p>No active matches.</p>
+          ) : (
+            <ul style={{ listStyle: 'none', padding: 0 }}>
+              {confirmedMatches.map((match) => {
+                const isToUser = rides.some((r) => r.id === match.toRideId);
+                const partnerRideId = isToUser ? match.fromRideId : match.toRideId;
+                const partnerRide = matchRides.get(partnerRideId);
+                const user = partnerRide ? users.get(partnerRide.userId) : null;
+                const canStart = match.status === 'CONFIRMED';
+
+                return (
+                  <li key={match.id} style={{ padding: '15px', borderBottom: '1px solid #eee' }}>
+                    <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
+                      {user && <img src={getProfileImageUrl(user.profilePictureUrl)} alt="Profile" style={{ width: '40px', height: '40px', borderRadius: '50%' }} />}
+                      <div style={{ flex: 1 }}>
+                        <div>Partner: <strong>{user?.username}</strong> (Trust: {user?.trustScore})</div>
+                        <div style={{ fontSize: '0.9rem' }}>Destination: {partnerRide?.dropoffAddress}</div>
+                      </div>
+                      {canStart && (
+                        <button
+                          className="gp-btn"
+                          style={{ width: 'auto', background: 'var(--primary-color)' }}
+                          onClick={() => startJourney(match.id)}
+                        >
+                          Start Journey
+                        </button>
+                      )}
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+
+        <div className="text-center mb-4">
+          <button
+            className="gp-btn gp-btn-secondary"
+            style={{ width: 'auto' }}
+            onClick={() => navigate('/parent/signup')}
+          >
+            👨‍👩‍👧 Register as Parent
+          </button>
+        </div>
+      </div>
+    </>
   );
 };
 

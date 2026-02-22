@@ -3,7 +3,7 @@ import axios from "axios";
 import { MapContainer, TileLayer, Marker } from "react-leaflet";
 import 'leaflet/dist/leaflet.css'; // ADDED: Import Leaflet CSS
 
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8080';
+import { api } from "./api";
 
 const ParentHome: React.FC = () => {
   const [data, setData] = useState({ childLat: 0, childLon: 0, rideStatus: "IDLE", partnerUsername: "", partnerPhone: "", childRideId: 0 });
@@ -11,7 +11,7 @@ const ParentHome: React.FC = () => {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const res = await axios.get(`${API_BASE}/api/parent/auth/me`, { withCredentials: true });
+        const res = await api.get("/api/parent/auth/me");
         setData(res.data);
       } catch (error) {
         console.error("Failed to fetch parent data:", error);
@@ -33,9 +33,9 @@ const ParentHome: React.FC = () => {
       <p>Ride Status: {data.rideStatus}</p>
       <p>Partner: {data.partnerUsername} ({data.partnerPhone})</p>
       {hasValidPosition ? (
-        <MapContainer 
-          center={[data.childLat, data.childLon]} 
-          zoom={13} 
+        <MapContainer
+          center={[data.childLat, data.childLon]}
+          zoom={13}
           style={{ height: '400px', width: '100%' }} // ADDED: Set height/width
         >
           <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />

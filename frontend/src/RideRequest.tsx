@@ -35,7 +35,11 @@ const tempIcon = new L.Icon({
   iconAnchor: [12, 41],
 });
 
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8080';
+import { api } from './api';
+
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8080'; // Keeping for Leaflet icons only if needed, but likely not.
+// Ideally remove API_BASE entirely and rely on api instance.
+
 
 interface Location {
   lat: number;
@@ -118,10 +122,9 @@ const RideRequest: React.FC = () => {
   const reverseGeocode = async (lat: number, lon: number): Promise<string> => {
     for (let i = 0; i < 3; i++) {
       try {
-        const response = await axios.get<{ display_name: string }>(`${API_BASE}/api/rides/reverse-geocode`, {
+        const response = await api.get<{ display_name: string }>(`/api/rides/reverse-geocode`, {
           params: { lat, lon },
-          withCredentials: true,
-          timeout: 5000, // Added timeout
+          timeout: 5000,
         });
         return response.data.display_name || 'Unknown location';
       } catch (err: any) {
@@ -144,10 +147,9 @@ const RideRequest: React.FC = () => {
       try {
         setLoading(true);
         console.log('Attempting geocode for:', query);
-        const res = await axios.get<{ lat: number; lon: number }>(`${API_BASE}/api/rides/geocode`, {
+        const res = await api.get<{ lat: number; lon: number }>(`/api/rides/geocode`, {
           params: { address: query },
-          withCredentials: true,
-          timeout: 5000, // Added timeout
+          timeout: 5000,
         });
         console.log('Geocode response:', res.data);
         const { lat, lon } = res.data;
@@ -220,8 +222,8 @@ const RideRequest: React.FC = () => {
 
     for (let i = 0; i < 3; i++) {
       try {
-        const response = await axios.post<RideResponse>(
-          `${API_BASE}/api/rides/request`,
+        const response = await api.post<RideResponse>(
+          `/api/rides/request`,
           {
             pickupLat: pickup.lat,
             pickupLon: pickup.lon,
@@ -229,8 +231,7 @@ const RideRequest: React.FC = () => {
             dropoffLon: dropoff.lon,
           },
           {
-            withCredentials: true,
-            timeout: 10000, // Added timeout for POST
+            timeout: 10000,
           }
         );
         toast.success('Ride request successful!');

@@ -1,77 +1,68 @@
-# Dockerfile for FastAPI + YOLOv8 (CPU) - Optimized, multi-stage, headless OpenCV
-# Fixes libxcb.so.1 + python-multipart + all debug issues
-# Pre-downloads model, uses venv, ~150MB final image
-
-# ==============================================================================
-# Stage 1: Builder (full deps + model download)
-# ==============================================================================
-FROM python:3.11 AS builder
+# Use specific Debian version (bookworm) instead of latest (trixie)
+FROM python:3.11-slim-bookworm as builder
 
 WORKDIR /app
-COPY app.py .
 
-# Build tools
+# Install build dependencies with correct package names for Debian bookworm
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
+    g++ \
+    libgl1 \
+    libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# Venv + ALL deps (python-multipart added)
-RUN python -m venv /venv
-ENV PATH="/venv/bin:$PATH"
-RUN pip install --upgrade pip
-RUN pip install \
-    fastapi \
-    transformers \
-    uvicorn[standard] \
-    python-multipart \          
-    ultralytics \
-    scikit-learn \
-    pillow \
-    pydantic
+# Copy requirements first
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir --root-user-action=ignore -r requirements.txt
 
-# Headless OpenCV (ultralytics pulls full → replace)
-RUN pip uninstall -y opencv-python opencv-python-headless || true && \
-    pip install opencv-python-headless
-
-# Pre-download YOLOv8n.pt
-RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
-
-# ==============================================================================
-# Stage 2: Runtime (slim + EXACT debug libs)
-# ==============================================================================
+# Final stage
 FROM python:3.11-slim-bookworm
 
 WORKDIR /app
 
-# EXACT libs from your debug session (fixes libxcb.so.1)
-ENV DEBIAN_FRONTEND=noninteractive
+# Install runtime dependencies with correct package names
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 \
+    libglib2.0-0 \
     libsm6 \
     libxext6 \
-    libxrender1 \
-    libxcb1 \
+    libxrender-dev \
     libgomp1 \
-    libice6 \
-    libx11-6 \
-    libx11-data \
-    libxau6 \
-    libxdmcp6 \
-    x11-common \
-    libglib2.0-0 \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy venv + files
-COPY --from=builder /venv /venv
-COPY --from=builder /app/app.py .
-COPY --from=builder /app/yolov8n.pt .
+# Copy installed packages from builder
+COPY --from=builder /usr/local/lib/python3.11/site-packages/ /usr/local/lib/python3.11/site-packages/
+COPY --from=builder /usr/local/bin/ /usr/local/bin/
 
-# Activate venv
-ENV PATH="/venv/bin:$PATH" \
-    PYTHONUNBUFFERED=1
+# Copy application code
+COPY app.py .
+
+# Create a download script for models
+RUN echo 'import sys\n\
+try:\n\
+    from ultralytics import YOLO\n\
+    print("Downloading YOLOv8 model...")\n\
+    YOLO("yolov8n.pt")\n\
+    print("YOLO model downloaded successfully")\n\
+except Exception as e:\n\
+    print(f"Warning: YOLO model download failed: {e}", file=sys.stderr)\n\
+    sys.exit(0)\n' > download_model.py
+
+# Download model during build
+RUN python download_model.py
+
+# Create non-root user
+RUN useradd -m -u 1000 fastapi && \
+    chown -R fastapi:fastapi /app
+
+USER fastapi
 
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+# Health check with longer timeout
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:8000/ || exit 1
 
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
